@@ -1,0 +1,19 @@
+[Unit]
+Description=ordersblock - análisis CBS sin IA (API)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=analisis
+WorkingDirectory=/opt/ordersblock_analisis
+EnvironmentFile=/opt/ordersblock_analisis/.env
+ExecStart=/opt/ordersblock_analisis/venv/bin/uvicorn api:app --host 127.0.0.1 --port 8091 --workers 1 --proxy-headers
+Restart=always
+RestartSec=5
+# Topes para no quitarle recursos a ICC FUTUROS en el mismo droplet
+MemoryMax=600M
+CPUQuota=80%
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

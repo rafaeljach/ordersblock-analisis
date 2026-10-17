@@ -1,0 +1,9 @@
+# Opción B: si usas Cloudflare Tunnel (cloudflared) en el droplet.
+# Añade esta entrada en /etc/cloudflared/config.yml ANTES de la regla final 404:
+ingress:
+  - hostname: analisis.ordersblock.com
+    service: http://127.0.0.1:8091
+  # ... tus otras reglas ...
+  - service: http_status:404
+# Luego: cloudflared tunnel route dns <NOMBRE_TUNEL> analisis.ordersblock.com
+#        sudo systemctl restart cloudflared
