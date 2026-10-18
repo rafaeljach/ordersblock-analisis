@@ -8,6 +8,7 @@ Endpoints (todos GET, respuesta JSON):
   /prediccion/{mercado}?minutos=5|15|30|60&strike=&cuota=
   /bloques/{mercado}                      los 4 vencimientos de reloj de ahora
   /memoria?mercado=BTC                    fiabilidad verificada (lo que lleva aprendido)
+  /oportunidades?excluir=EURUSD&n=5       dónde SÍ hay ventaja ahora (escáner en segundo plano)
 
 Seguridad: si ORDERSBLOCK_API_KEY está definida, toda ruta salvo /salud
 exige la cabecera  X-API-Key: <clave>. Sin ella cualquiera podría usar
@@ -32,6 +33,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+import escaner
 import memoria
 import predicciones
 import servicio
@@ -160,6 +162,17 @@ async def bloques(request: Request):
     return JSONResponse({"ok": True, "datos": out})
 
 
+async def oportunidades(request: Request):
+    """Ranking del escáner: mercados con esperanza positiva y consenso suficiente, ya calculados."""
+    if not _autorizado(request):
+        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+    try:
+        n = int(request.query_params.get("n", "5"))
+    except ValueError:
+        n = 5
+    return JSONResponse({"ok": True, "datos": escaner.oportunidades(request.query_params.get("excluir"), n)})
+
+
 async def memoria_ruta(request: Request):
     if not _autorizado(request):
         return _error(401, "Falta o es inválida la cabecera X-API-Key.")
@@ -189,12 +202,15 @@ async def _ciclo_de_vida(app):
     tarea = None
     if os.getenv("ORDERSBLOCK_SIN_WORKER") != "1":
         tarea = asyncio.get_running_loop().create_task(_worker_verificacion())
+    if os.getenv("ORDERSBLOCK_SIN_ESCANER") != "1":
+        escaner.arrancar()
     logger.info(f"ordersblock-analisis listo (API key {'activa' if API_KEY else 'DESACTIVADA'})")
     try:
         yield
     finally:
         if tarea:
             tarea.cancel()
+        escaner.detener()
 
 
 app = Starlette(
@@ -206,6 +222,7 @@ app = Starlette(
         Route("/bloques/{mercado}", bloques),
         Route("/bloques", bloques),
         Route("/memoria", memoria_ruta),
+        Route("/oportunidades", oportunidades),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],

@@ -125,6 +125,28 @@ def main():
     comprobar(r["calibracion"]["factor"] < 0 or (r["memoria"] or {}).get("invertir"),
               f"la lectura se invierte al aprender (factor {r['calibracion']['factor']})")
 
+    print("\n== Escáner de oportunidades")
+    import escaner
+    os.environ["ORDERSBLOCK_ESCANER_MERCADOS"] = "BTC,ETH,NOEXISTE"
+    escaner.PAUSA_SEG = 0
+    escaner.ARCHIVO = os.path.join(tempfile.mkdtemp(), "escaner.json")
+    antes = memoria.resumen("BTC")["senales"]["emitidas"]
+    est = escaner.ciclo()
+    comprobar(set(est["mercados"]) == {"BTC", "ETH"}, "recorre solo los mercados conocidos del universo")
+    comprobar(all(not r.get("error") for r in est["mercados"].values()), "los dos mercados se analizaron sin error")
+    comprobar(os.path.exists(escaner.ARCHIVO), "el resultado se guarda en disco")
+    op = escaner.oportunidades("BTC", 5)
+    comprobar(op["escaneados"] == 2 and all(o["mercado"] != "BTC" for o in op["oportunidades"]),
+              "oportunidades excluye el mercado consultado")
+    falso = {"mercado": "X", "direccion": "ALCISTA", "consenso_pct": 70, "esperanza_r": 0.3,
+             "entrada": 1, "sl": 0.9, "tp1": 1.2, "prob_tp_pct": 60}
+    comprobar(escaner.es_oportunidad(falso) and not escaner.es_oportunidad({**falso, "esperanza_r": -0.1})
+              and not escaner.es_oportunidad({**falso, "consenso_pct": 40}),
+              "solo cuenta como oportunidad con esperanza positiva y consenso suficiente")
+    comprobar(escaner.puntuacion(falso) > escaner.puntuacion({**falso, "consenso_pct": 55}),
+              "a igual esperanza, mas consenso puntua mas alto")
+    comprobar(memoria.resumen("BTC")["senales"]["emitidas"] == antes, "el escaner no registra senales en la memoria")
+
     print("\n== Sin dependencias de IA")
     for f in os.listdir(RAIZ):
         if f.endswith(".py"):

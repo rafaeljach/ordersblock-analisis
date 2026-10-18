@@ -16,6 +16,7 @@ empaquetado como una API independiente para `ordersblock.com` / Orders Wallet.
 | `memoria.py` | **Nuevo.** Memoria propia en SQLite: registra cada análisis y lo verifica contra el precio real. |
 | `servicio.py` | **Nuevo.** Orquesta todo igual que la ruta sin IA del bot, sin Telegram ni créditos. |
 | `api.py` | **Nuevo.** API HTTP (Starlette) + worker que verifica cada 2 min. |
+| `escaner.py` | **Nuevo.** Escaner de oportunidades: recorre el universo cada 15 min (un mercado a la vez, pausa entre cada uno) y guarda el ultimo analisis; `/oportunidades` lo sirve al instante. No registra en memoria. |
 | `ejemplo_app/PantallaAnalisis.js` | Pantalla de ejemplo para la app (Expo/React Native), tema oscuro con verde. |
 | `despliegue/` | Servicio systemd, `.env` de ejemplo, nginx y Cloudflare Tunnel. |
 | `tests/test_sintetico.py` | Pruebas sin red con velas sintéticas. |
@@ -35,6 +36,7 @@ GET /bloques                              vencimientos de reloj vigentes (13:15,
 GET /prediccion/BTC?minutos=15            ARRIBA/ABAJO + % al cierre del bloque
 GET /prediccion/BTC?minutos=15&strike=64000&cuota=0.55   con referencia y cuota de Polymarket/Kalshi
 GET /memoria?mercado=BTC                  lo verificado hasta ahora (fiabilidad real)
+GET /oportunidades?excluir=EURUSD&n=5     donde SI hay ventaja ahora (escaner en segundo plano, ya calculado)
 ```
 
 Respuesta: `{"ok": true, "datos": {...}}` o `{"ok": false, "error": "..."}`.
