@@ -10,6 +10,7 @@ Endpoints (todos GET, respuesta JSON):
   /memoria?mercado=BTC                    fiabilidad verificada (lo que lleva aprendido)
   /oportunidades?excluir=EURUSD&n=5       dónde SÍ hay ventaja ahora (escáner en segundo plano)
   /precios                                cintillo: mercados principales (público, sin clave, caché 30 s)
+  /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
 
 Seguridad: si ORDERSBLOCK_API_KEY está definida, toda ruta salvo /salud
 exige la cabecera  X-API-Key: <clave>. Sin ella cualquiera podría usar
@@ -26,6 +27,7 @@ import hmac
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -183,6 +185,53 @@ async def precios_ruta(request: Request):
                         headers={"Cache-Control": "public, max-age=30"})
 
 
+_TF_A_INTERVALO = {"15": "15min", "60": "1h", "240": "4h", "1440": "1day"}
+_cache_velas: dict = {}
+
+
+async def velas_ruta(request: Request):
+    """Público: velas OHLC (sin indicadores ni análisis) para pintar el gráfico en vivo en la app.
+    Sale de la misma caché que usa el motor; una pasada por mercado y temporalidad cada 60 s como mucho."""
+    if not _limite_ok(_cliente(request)):
+        return _error(429, "Demasiadas consultas; espera un minuto.")
+    mercado = servicio.engine.normalizar_mercado(request.path_params["mercado"])
+    tf = str(request.query_params.get("tf", "60"))
+    if tf not in _TF_A_INTERVALO:
+        return _error(400, "tf debe ser 15, 60, 240 o 1440")
+    try:
+        n = max(50, min(300, int(request.query_params.get("n", "200"))))
+    except ValueError:
+        n = 200
+    clave = f"{mercado}:{tf}:{n}"
+    ahora = time.time()
+    hit = _cache_velas.get(clave)
+    if hit and ahora - hit[0] < 60:
+        return JSONResponse({"ok": True, "datos": hit[1]}, headers={"Cache-Control": "public, max-age=30"})
+    try:
+        async with _semaforo:
+            datos = await asyncio.to_thread(servicio.engine.obtener_datos_mercado, mercado,
+                                            _TF_A_INTERVALO[tf], n, servicio.engine.PRIORIDAD_WORKER)
+    except Exception as e:
+        if hit:
+            return JSONResponse({"ok": True, "datos": hit[1]}, headers={"Cache-Control": "public, max-age=30"})
+        return _error(503, f"{mercado}: sin velas ({type(e).__name__})")
+    velas = []
+    for v in datos.get("velas", []):
+        dt = str(v.get("datetime", ""))
+        try:
+            t = int(datetime.fromisoformat(dt.replace("Z", "+00:00")).replace(tzinfo=timezone.utc).timestamp() * 1000) if dt else None
+        except ValueError:
+            t = None
+        velas.append({"t": t, "o": v["open"], "h": v["high"], "l": v["low"], "c": v["close"]})
+    salida = {"mercado": mercado, "tf": int(tf), "velas": velas, "precio_actual": float(datos.get("precio_actual", 0) or 0),
+              "fuente": datos.get("fuente_datos"), "actualizado_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    _cache_velas[clave] = (ahora, salida)
+    if len(_cache_velas) > 200:
+        for k in [k for k, (t0, _) in list(_cache_velas.items()) if ahora - t0 > 600]:
+            _cache_velas.pop(k, None)
+    return JSONResponse({"ok": True, "datos": salida}, headers={"Cache-Control": "public, max-age=30"})
+
+
 async def memoria_ruta(request: Request):
     if not _autorizado(request):
         return _error(401, "Falta o es inválida la cabecera X-API-Key.")
@@ -237,6 +286,7 @@ app = Starlette(
         Route("/memoria", memoria_ruta),
         Route("/oportunidades", oportunidades),
         Route("/precios", precios_ruta),
+        Route("/velas/{mercado}", velas_ruta),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],

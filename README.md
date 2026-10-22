@@ -131,3 +131,7 @@ custodiar ni operar, pero conviene mantener visible el aviso
 ## Cintillo de precios (`/precios`)
 
 Ruta pública (sin clave) que devuelve los mercados principales con precio, variación 24 h y hora. Un hilo la refresca en memoria: cripto y oro desde Bybit cada 30 s; plata y forex desde Twelve Data cada 10 min (solo con `TWELVEDATA_API_KEY`, de lunes a viernes). El navegador de ordersblock.com la consulta directo, sin pasar por Cloudflare. Variables: `ORDERSBLOCK_PRECIOS_CRIPTO_SEG`, `ORDERSBLOCK_PRECIOS_FX_SEG`, `ORDERSBLOCK_SIN_PRECIOS=1` para apagarlo.
+
+## Velas para la vista Mercado (`/velas/{mercado}?tf=60&n=200`)
+
+Ruta pública que devuelve velas OHLC (sin indicadores) desde la misma caché del motor, una pasada por mercado y temporalidad cada 60 s. La app la usa para el gráfico en vivo con el plan pintado encima. `tf` admite 15, 60, 240 y 1440; `n` entre 50 y 300.
