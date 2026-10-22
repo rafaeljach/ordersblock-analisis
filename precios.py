@@ -6,13 +6,20 @@ Un hilo refresca en memoria los mercados principales y la ruta pública
 (sin pasar por el Worker de Cloudflare), así que mil visitantes cuestan
 lo mismo que uno: lo que pida este hilo.
 
-Fuentes:
+Fuentes (todas gratis):
   - Cripto y oro: tickers públicos de Bybit (sin clave, sin límite práctico).
-  - Plata y forex: Twelve Data /quote (1 crédito por símbolo). El plan
-    gratuito da 800 créditos al día, así que se refresca cada
-    ORDERSBLOCK_PRECIOS_FX_SEG (600 s por defecto) y solo de lunes a viernes:
-    4 símbolos x 6/h x 24 h x 5 días = 2.880 a la semana, bien por debajo
-    del tope semanal y sin estorbar al motor de análisis.
+  - Forex (EURUSD, GBPUSD, USDJPY): ticker público de Kraken (sin clave, sin
+    cuota diaria), al mismo ritmo que la cripto.
+  - Plata, y forex solo si Kraken falla: Twelve Data /quote (1 crédito por
+    símbolo). OJO: el plan gratuito da 800 créditos AL DÍA compartidos con el
+    motor de análisis, el escáner y las velas de la vista Mercado. Antes este
+    hilo pedía 4 símbolos cada 10 min (576 créditos diarios, sin pasar por el
+    contador del motor) y dejaba a los análisis sin cuota. Ahora:
+      * cada crédito pide permiso al limitador del motor con prioridad de
+        proceso automático: nunca toca la reserva de los usuarios;
+      * como mucho cada ORDERSBLOCK_PRECIOS_FX_SEG (1800 s por defecto);
+      * si Twelve Data dice que se acabaron los créditos del día, no se le
+        vuelve a pedir nada hasta las 00:00 UTC.
 
 Si una fuente falla, se conserva el último precio bueno con su hora: el
 cintillo nunca muestra ceros.
@@ -30,6 +37,7 @@ logger = logging.getLogger("ordersblock.precios")
 
 BYBIT = "https://api.bybit.com/v5/market/tickers"
 TWELVE_QUOTE = "https://api.twelvedata.com/quote"
+KRAKEN = "https://api.kraken.com/0/public/Ticker"
 
 # Orden en que se muestran. (clave, fuente, símbolo en la fuente, decimales)
 MERCADOS = [
@@ -38,19 +46,22 @@ MERCADOS = [
     ("SOLUSD", "bybit", "SOLUSDT", 2),
     ("XAUUSD", "bybit", "XAUUSDT", 2),
     ("XAGUSD", "twelve", "XAG/USD", 3),
-    ("EURUSD", "twelve", "EUR/USD", 5),
-    ("GBPUSD", "twelve", "GBP/USD", 5),
-    ("USDJPY", "twelve", "USD/JPY", 3),
+    ("EURUSD", "kraken", "EURUSD", 5),
+    ("GBPUSD", "kraken", "GBPUSD", 5),
+    ("USDJPY", "kraken", "USDJPY", 3),
 ]
+# Símbolo en Twelve Data para usarlo de respaldo si Kraken no responde
+RESPALDO_TWELVE = {"EURUSD": "EUR/USD", "GBPUSD": "GBP/USD", "USDJPY": "USD/JPY"}
 
 CRIPTO_SEG = int(os.getenv("ORDERSBLOCK_PRECIOS_CRIPTO_SEG", "30"))
-FX_SEG = int(os.getenv("ORDERSBLOCK_PRECIOS_FX_SEG", "600"))
+FX_SEG = int(os.getenv("ORDERSBLOCK_PRECIOS_FX_SEG", "1800"))
 TWELVE_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 
 _lock = threading.Lock()
 _precios: dict = {}          # clave -> {"precio", "cambio_pct", "hora_utc", "fuente"}
 _hilo = None
 _parar = threading.Event()
+_twelve_bloqueado_hasta = {"ts": 0.0}   # créditos del día agotados: no insistir hasta las 00:00 UTC
 
 
 def _ahora():
@@ -87,17 +98,80 @@ def refrescar_bybit(get=requests.get) -> int:
     return n
 
 
-def refrescar_twelve(get=requests.get, clave_api=None) -> int:
-    """Una sola llamada /quote con todos los símbolos forex y metales (1 crédito por símbolo)."""
+def refrescar_kraken(get=requests.get) -> list:
+    """Forex desde Kraken, un par por petición (no depende del nombre interno del par).
+    Variación = contra la apertura del día UTC. Devuelve las claves que NO se pudieron actualizar."""
+    fallidos = []
+    for clave, fuente, symbol, dec in MERCADOS:
+        if fuente != "kraken":
+            continue
+        try:
+            d = get(KRAKEN, params={"pair": symbol}, timeout=8).json()
+            res = d.get("result") or {}
+            if d.get("error") or len(res) != 1:
+                fallidos.append(clave)
+                continue
+            t = next(iter(res.values()))
+            ultimo, apertura = float(t["c"][0]), float(t.get("o") or 0)
+            if ultimo <= 0:
+                fallidos.append(clave)
+                continue
+            pct = (ultimo - apertura) / apertura * 100 if apertura > 0 else None
+            _guardar(clave, ultimo, pct, "kraken", dec)
+        except Exception as e:  # red, JSON, campo ausente
+            fallidos.append(clave)
+            logger.warning(f"precios kraken {symbol}: {type(e).__name__}: {e}")
+    return fallidos
+
+
+def _permiso_motor():
+    """Cada crédito de Twelve Data pasa por el limitador del motor, como proceso automático:
+    cede ante los análisis de los usuarios y queda contado en el total del día."""
+    try:
+        import real_engine
+        return lambda: real_engine._pedir_permiso(real_engine.PRIORIDAD_WORKER, esperar=False)
+    except Exception:
+        return lambda: True
+
+
+def _manana_utc() -> float:
+    t = datetime.now(timezone.utc)
+    return datetime(t.year, t.month, t.day, tzinfo=timezone.utc).timestamp() + 86400
+
+
+def refrescar_twelve(get=requests.get, clave_api=None, claves=None, permiso=None) -> int:
+    """Una llamada /quote solo con los símbolos que tengan permiso de cuota (1 crédito por símbolo).
+    claves: qué mercados pedir (por defecto, los que son de Twelve Data en MERCADOS)."""
     clave_api = TWELVE_KEY if clave_api is None else clave_api
-    if not clave_api:
+    if not clave_api or time.time() < _twelve_bloqueado_hasta["ts"]:
         return 0
-    pares = [(c, s, dec) for c, f, s, dec in MERCADOS if f == "twelve"]
+    if claves is None:
+        claves = [c for c, f, _, _ in MERCADOS if f == "twelve"]
+    dec_de = {c: d for c, _, _, d in MERCADOS}
+    sym_de = {c: s for c, f, s, _ in MERCADOS if f == "twelve"}
+    sym_de.update(RESPALDO_TWELVE)
+    permiso = permiso or _permiso_motor()
+    pares = []
+    for c in claves:
+        if c not in sym_de:
+            continue
+        if not permiso():          # sin margen de cuota: se deja para la próxima vuelta
+            break
+        pares.append((c, sym_de[c], dec_de.get(c, 5)))
+    if not pares:
+        return 0
     try:
         r = get(TWELVE_QUOTE, params={"symbol": ",".join(s for _, s, _ in pares), "apikey": clave_api}, timeout=10)
         d = r.json()
     except Exception as e:
         logger.warning(f"precios twelve: {type(e).__name__}: {e}")
+        return 0
+    if isinstance(d, dict) and d.get("status") == "error":
+        msg = str(d.get("message", "")).lower()
+        if "credits" in msg or "run out" in msg or str(d.get("code")) == "429":
+            # Se acabaron los créditos del día: no insistir (cada intento fallido también molesta al motor)
+            _twelve_bloqueado_hasta["ts"] = _manana_utc() if ("day" in msg or "daily" in msg or "run out" in msg) else time.time() + 120
+            logger.warning(f"precios twelve: cuota agotada, en pausa ({d.get('message')})")
         return 0
     n = 0
     for clave, symbol, dec in pares:
@@ -130,8 +204,10 @@ def _bucle():
     while not _parar.is_set():
         try:
             refrescar_bybit()
-            if time.time() - ultimo_fx >= FX_SEG and (_es_horario_fx() or not _precios.get("EURUSD")):
-                refrescar_twelve()
+            fallidos = refrescar_kraken()
+            # Twelve Data solo para la plata y, si Kraken no respondió, para el forex que falte; como mucho cada FX_SEG
+            if time.time() - ultimo_fx >= FX_SEG and (_es_horario_fx() or not _precios.get("XAGUSD")):
+                refrescar_twelve(claves=[c for c, f, _, _ in MERCADOS if f == "twelve"] + fallidos)
                 ultimo_fx = time.time()
         except Exception as e:
             logger.error(f"precios: {type(e).__name__}: {e}")
@@ -145,8 +221,8 @@ def arrancar():
     _parar.clear()
     _hilo = threading.Thread(target=_bucle, name="precios", daemon=True)
     _hilo.start()
-    logger.info(f"cintillo de precios activo: cripto cada {CRIPTO_SEG}s, forex cada {FX_SEG}s"
-                + ("" if TWELVE_KEY else " (sin TWELVEDATA_API_KEY: solo cripto y oro)"))
+    logger.info(f"cintillo de precios activo: cripto y forex (Kraken) cada {CRIPTO_SEG}s, plata (Twelve Data) cada {FX_SEG}s"
+                + ("" if TWELVE_KEY else " (sin TWELVEDATA_API_KEY: sin plata)"))
 
 
 def detener():
