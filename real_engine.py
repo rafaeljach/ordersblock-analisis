@@ -1117,6 +1117,60 @@ def _velas_desde_bybit(mercado: str, interval: str, outputsize: int):
         return None
 
 
+# --- Kraken para forex: gratis, sin clave y SIN cuota diaria -------------------
+# Twelve Data (plan gratuito) da 800 créditos al día para todo el droplet; con
+# varios usuarios mirando forex en la vista Mercado más el escáner se agotaban
+# a media tarde y forex quedaba sin velas hasta las 00:00 UTC. Kraken publica
+# velas OHLC de los pares fiat principales. Si un par no existe en Kraken se
+# recuerda unas horas y se usa Twelve Data como siempre.
+KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
+_INTERVALO_A_KRAKEN = {"1min": 1, "5min": 5, "15min": 15, "30min": 30, "1h": 60,
+                       "4h": 240, "1day": 1440, "1week": 10080}
+_KRAKEN_SIN_PAR: dict = {}          # par -> instante hasta el que no se vuelve a probar
+
+
+def _es_forex_fiat(mercado: str) -> bool:
+    m = normalizar_mercado(mercado)
+    return (m in FOREX_AMPLIADO or m in ("EURUSD", "GBPUSD", "USDCOP")) and len(m) == 6
+
+
+def _velas_desde_kraken(mercado: str, interval: str, outputsize: int, get=None):
+    """Velas de forex desde Kraken. None si no aplica o falla (el llamador sigue con Twelve Data)."""
+    m = normalizar_mercado(mercado)
+    iv = _INTERVALO_A_KRAKEN.get(interval)
+    if not iv or not _es_forex_fiat(m) or time.time() < _KRAKEN_SIN_PAR.get(m, 0):
+        return None
+    from datetime import datetime, timezone
+    get = get or requests.get
+    try:
+        d = get(KRAKEN_OHLC, params={"pair": m, "interval": iv}, timeout=10).json()
+        if d.get("error"):
+            if any("Unknown asset pair" in str(e) for e in d["error"]):
+                _KRAKEN_SIN_PAR[m] = time.time() + 6 * 3600
+            logger.info(f"Kraken sin velas de {m}: {d['error']} — se usa Twelve Data")
+            return None
+        res = d.get("result") or {}
+        filas = next((v for k, v in res.items() if k != "last" and isinstance(v, list)), None) or []
+        # [time(s), open, high, low, close, vwap, volume, count], de la más vieja a la más nueva
+        velas = []
+        for f in filas[-int(outputsize):]:
+            try:
+                velas.append({
+                    "datetime": datetime.fromtimestamp(int(f[0]), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                    "open": float(f[1]), "high": float(f[2]), "low": float(f[3]), "close": float(f[4]),
+                    "volume": float(f[6]),
+                })
+            except (ValueError, IndexError, TypeError):
+                continue
+        if len(velas) < 30 or velas[-1]["close"] <= 0:
+            logger.warning(f"Kraken devolvió solo {len(velas)} velas de {m} — se usa Twelve Data")
+            return None
+        return velas
+    except Exception as e:
+        logger.warning(f"Kraken no sirvió velas de {m}: {type(e).__name__}: {e} — se usa Twelve Data")
+        return None
+
+
 def obtener_datos_mercado(mercado: str, interval: str = "1h", outputsize: int = 200,
                            prioridad: str = PRIORIDAD_USUARIO):
     """
@@ -1171,8 +1225,16 @@ def obtener_datos_mercado(mercado: str, interval: str = "1h", outputsize: int = 
         _cache[cache_key] = (resultado, ahora)
         return resultado
 
-    # Twelve Data como respaldo: forex, metales, acciones y cualquier
-    # cripto que Bybit no liste.
+    # SEGUNDO KRAKEN (forex): gratis y sin cuota diaria. Ahorra créditos de
+    # Twelve Data para lo que solo él tiene (metales, acciones, exóticos).
+    velas_kraken = _velas_desde_kraken(mercado, interval, outputsize)
+    if velas_kraken:
+        resultado = _procesar_velas(velas_kraken, mercado, symbol, "kraken")
+        _cache[cache_key] = (resultado, ahora)
+        return resultado
+
+    # Twelve Data como respaldo: metales, acciones, forex que Kraken no
+    # tenga y cualquier cripto que Bybit no liste.
     return _pedir_a_twelvedata(mercado, symbol, interval, outputsize,
                                 prioridad, cache_key, ahora)
 
