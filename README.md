@@ -127,3 +127,7 @@ Una clave metida dentro de la APK **se puede extraer**. Dos opciones:
 Google Play pide declarar las funciones financieras. Mostrar análisis no es
 custodiar ni operar, pero conviene mantener visible el aviso
 "Análisis probabilístico. No es asesoría financiera." que ya trae cada respuesta.
+
+## Cintillo de precios (`/precios`)
+
+Ruta pública (sin clave) que devuelve los mercados principales con precio, variación 24 h y hora. Un hilo la refresca en memoria: cripto y oro desde Bybit cada 30 s; plata y forex desde Twelve Data cada 10 min (solo con `TWELVEDATA_API_KEY`, de lunes a viernes). El navegador de ordersblock.com la consulta directo, sin pasar por Cloudflare. Variables: `ORDERSBLOCK_PRECIOS_CRIPTO_SEG`, `ORDERSBLOCK_PRECIOS_FX_SEG`, `ORDERSBLOCK_SIN_PRECIOS=1` para apagarlo.

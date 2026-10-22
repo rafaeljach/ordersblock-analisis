@@ -9,6 +9,7 @@ Endpoints (todos GET, respuesta JSON):
   /bloques/{mercado}                      los 4 vencimientos de reloj de ahora
   /memoria?mercado=BTC                    fiabilidad verificada (lo que lleva aprendido)
   /oportunidades?excluir=EURUSD&n=5       dónde SÍ hay ventaja ahora (escáner en segundo plano)
+  /precios                                cintillo: mercados principales (público, sin clave, caché 30 s)
 
 Seguridad: si ORDERSBLOCK_API_KEY está definida, toda ruta salvo /salud
 exige la cabecera  X-API-Key: <clave>. Sin ella cualquiera podría usar
@@ -35,6 +36,7 @@ from starlette.routing import Route
 
 import escaner
 import memoria
+import precios
 import predicciones
 import servicio
 
@@ -173,6 +175,14 @@ async def oportunidades(request: Request):
     return JSONResponse({"ok": True, "datos": escaner.oportunidades(request.query_params.get("excluir"), n)})
 
 
+async def precios_ruta(request: Request):
+    """Público: lo lee el navegador del usuario para el cintillo. Sin clave (no expone nada privado)."""
+    if not _limite_ok(_cliente(request)):
+        return _error(429, "Demasiadas consultas; espera un minuto.")
+    return JSONResponse({"ok": True, "datos": precios.snapshot()},
+                        headers={"Cache-Control": "public, max-age=30"})
+
+
 async def memoria_ruta(request: Request):
     if not _autorizado(request):
         return _error(401, "Falta o es inválida la cabecera X-API-Key.")
@@ -204,6 +214,8 @@ async def _ciclo_de_vida(app):
         tarea = asyncio.get_running_loop().create_task(_worker_verificacion())
     if os.getenv("ORDERSBLOCK_SIN_ESCANER") != "1":
         escaner.arrancar()
+    if os.getenv("ORDERSBLOCK_SIN_PRECIOS") != "1":
+        precios.arrancar()
     logger.info(f"ordersblock-analisis listo (API key {'activa' if API_KEY else 'DESACTIVADA'})")
     try:
         yield
@@ -211,6 +223,7 @@ async def _ciclo_de_vida(app):
         if tarea:
             tarea.cancel()
         escaner.detener()
+        precios.detener()
 
 
 app = Starlette(
@@ -223,6 +236,7 @@ app = Starlette(
         Route("/bloques", bloques),
         Route("/memoria", memoria_ruta),
         Route("/oportunidades", oportunidades),
+        Route("/precios", precios_ruta),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],
