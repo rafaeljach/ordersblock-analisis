@@ -11,6 +11,7 @@ Endpoints (todos GET, respuesta JSON):
   /oportunidades?excluir=EURUSD&n=5       dónde SÍ hay ventaja ahora (escáner en segundo plano)
   /precios                                cintillo: mercados principales (público, sin clave, caché 30 s)
   /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
+  /velas/DXY?tf=60                         índice del dólar para el panel del oro (Yahoo o calculado con Kraken)
 
 Seguridad: si ORDERSBLOCK_API_KEY está definida, toda ruta salvo /salud
 exige la cabecera  X-API-Key: <clave>. Sin ella cualquiera podría usar
@@ -36,6 +37,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+import dxy
 import escaner
 import memoria
 import precios
@@ -202,6 +204,13 @@ async def velas_ruta(request: Request):
         n = max(50, min(300, int(request.query_params.get("n", "200"))))
     except ValueError:
         n = 200
+    # Índice del dólar para el panel de correlación del oro: Yahoo o calculado con Kraken (dxy.py)
+    if mercado in ("DXY", "USDX"):
+        try:
+            datos = await asyncio.to_thread(dxy.velas_dxy, tf, n)
+        except Exception as e:
+            return _error(503, f"DXY: sin velas ({type(e).__name__})")
+        return JSONResponse({"ok": True, "datos": datos}, headers={"Cache-Control": "public, max-age=60"})
     clave = f"{mercado}:{tf}:{n}"
     ahora = time.time()
     hit = _cache_velas.get(clave)
