@@ -33,6 +33,14 @@ nueva_carpeta_respaldo(){ # $1 = nombre del paso
 
 # git como root sobre un repo de otro usuario: se autoriza solo esta carpeta y solo en este comando
 G(){ git -c safe.directory="$APP" -c safe.directory="$APP/.git" -C "$APP" "$@"; }
+# Tras usar git o pip como root, devuelve los archivos a su dueno de siempre: .git y los archivos del
+# repositorio al dueno de la carpeta del motor, y el venv al dueno del venv. Asi un "git pull" futuro
+# hecho por ese usuario no falla por archivos de root. No toca .env, la base de datos ni otros archivos.
+normalizar_dueno(){
+  local d v; d=$(stat -c %u:%g "$APP"); chown -R "$d" "$APP/.git"
+  G ls-files -z | (cd "$APP" && xargs -0 -r chown -h "$d" 2>/dev/null) || true
+  if [ -d "$APP/venv" ]; then v=$(stat -c %u:%g "$APP/venv"); chown -R "$v" "$APP/venv"; fi
+}
 
 clave_api(){ grep -E "^ORDERSBLOCK_API_KEY=" "$APP/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"' '; }
 

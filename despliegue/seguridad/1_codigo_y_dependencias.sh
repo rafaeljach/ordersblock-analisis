@@ -13,7 +13,7 @@ if [ "$MODO" = revertir ]; then
   ANT=$(cat "$DIR_REVERTIR/commit")
   info "Volviendo al commit $ANT y a las librerias anteriores"
   G checkout -q "$ANT"
-  rm -rf "$APP/venv" && cp -a "$DIR_REVERTIR/venv" "$APP/venv"
+  rm -rf "$APP/venv" && cp -a "$DIR_REVERTIR/venv" "$APP/venv"; normalizar_dueno
   systemctl restart "$SVC"; salud && ok "Revertido" || falla "Revertido pero el motor no responde: revisa journalctl -u $SVC"
   exit 0
 fi
@@ -23,7 +23,7 @@ fi
 grep -qE "^ORDERSBLOCK_API_KEY=.{20,}" "$APP/.env" || { falla "ORDERSBLOCK_API_KEY no esta en .env: la version nueva responderia 503. Detente."; exit 1; }
 PYV=$("$APP/venv/bin/python" -c 'import sys;print("%d.%d"%sys.version_info[:2])')
 REQ=requirements.txt; [ "$(printf '%s\n3.11\n' "$PYV" | sort -V | head -1)" = 3.11 ] || REQ=requirements-py310.txt
-G fetch -q origin
+G fetch -q origin; normalizar_dueno
 info "Python del motor: $PYV  → se usara $REQ"
 info "Commit actual: $(G rev-parse --short HEAD)   → nuevo: $(G rev-parse --short "$REF")"
 G diff --stat HEAD "$REF" | tail -3
@@ -38,9 +38,9 @@ G worktree add -q --detach "$PRUEBA/codigo" "$REF"
 "$PRUEBA/venv/bin/pip" install -q -r "$PRUEBA/codigo/$REQ" httpx
 for t in "$PRUEBA"/codigo/tests/test_*.py; do
   ( cd "$PRUEBA/codigo" && ORDERSBLOCK_DB="$PRUEBA/t.db" "$PRUEBA/venv/bin/python" -I "$t" ) | tail -1 | grep -q "TODO OK" \
-    || { falla "Prueba $(basename "$t") falla con el codigo nuevo. No se toco produccion."; G worktree remove --force "$PRUEBA/codigo"; exit 1; }
+    || { falla "Prueba $(basename "$t") falla con el codigo nuevo. No se toco produccion."; G worktree remove --force "$PRUEBA/codigo"; normalizar_dueno; exit 1; }
 done
-G worktree remove --force "$PRUEBA/codigo"
+G worktree remove --force "$PRUEBA/codigo"; normalizar_dueno
 ok "Las pruebas del motor pasan con el codigo y las librerias nuevas"
 
 # 2) Respaldo
@@ -54,6 +54,7 @@ ok "Respaldo en $R (commit, venv completo y lista de librerias)"
 MARCA=$(date '+%Y-%m-%d %H:%M:%S')
 G checkout -q "$REF"
 "$APP/venv/bin/pip" install -q -r "$APP/$REQ"
+normalizar_dueno
 systemctl restart "$SVC"
 
 # 4) Verificar; si algo falla, volver atras solo
@@ -62,7 +63,7 @@ if salud && sleep 5 && sin_errores_desde "$MARCA"; then
   ok "Paso 1 aplicado. Para volver atras: sudo bash $0 --revertir $R"
 else
   falla "Algo fallo: volviendo atras automaticamente"
-  G checkout -q "$(cat "$R/commit")"; rm -rf "$APP/venv" && cp -a "$R/venv" "$APP/venv"
+  G checkout -q "$(cat "$R/commit")"; rm -rf "$APP/venv" && cp -a "$R/venv" "$APP/venv"; normalizar_dueno
   systemctl restart "$SVC"; salud && ok "Revertido; produccion como antes" || falla "Revisa journalctl -u $SVC"
   exit 1
 fi

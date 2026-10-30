@@ -11,7 +11,7 @@ t "Sistema"; . /etc/os-release 2>/dev/null; echo "$PRETTY_NAME"; uname -r; date 
 t "IP publica del droplet (ruta de salida)"; ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' 
 t "Python del motor"; "$APP/venv/bin/python" -V 2>&1
 t "Dependencias instaladas (motor)"; "$APP/venv/bin/pip" freeze 2>/dev/null | grep -iE "^(numpy|requests|starlette|fastapi|uvicorn|anyio|h11|urllib3|idna|certifi)=="
-t "Commit desplegado"; git -c safe.directory="$APP" -C "$APP" log --oneline -1 2>&1; git -c safe.directory="$APP" -C "$APP" status --short 2>&1 | head -10
+t "Commit desplegado"; git -c safe.directory="$APP" -C "$APP" log --oneline -1 2>&1; git --no-optional-locks -c safe.directory="$APP" -C "$APP" status --short 2>&1 | head -10
 t "Puertos escuchando (quien y donde)"; ss -tlnpH 2>/dev/null | awk '{print $4, $6}' | sort -u
 t "Servicio del motor (unidad efectiva)"; systemctl cat "$SVC" 2>&1 | grep -vE "^\s*#" | grep -v "^$"
 t "Estado"; systemctl is-active "$SVC"; systemctl show "$SVC" -p NoNewPrivileges -p ProtectSystem -p ProtectHome -p PrivateTmp -p User 2>&1
