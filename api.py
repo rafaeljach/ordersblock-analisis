@@ -13,10 +13,12 @@ Endpoints (todos GET, respuesta JSON):
   /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
   /velas/DXY?tf=60                         índice del dólar para el panel del oro (Yahoo o calculado con Kraken)
 
-Seguridad: si ORDERSBLOCK_API_KEY está definida, toda ruta salvo /salud
-exige la cabecera  X-API-Key: <clave>. Sin ella cualquiera podría usar
-el droplet como servicio de señales gratis y tumbar a ICC FUTUROS, que
-comparte la máquina.
+Seguridad: toda ruta salvo /salud, /precios y /velas exige la cabecera
+X-API-Key: <clave> (ORDERSBLOCK_API_KEY). Sin clave configurada el servicio
+FALLA CERRADO: esas rutas responden 503 en vez de quedar abiertas. Las rutas
+publicas limitan por la IP real que entrega Cloudflare (CF-Connecting-IP);
+X-Usuario solo se acepta de quien trae la clave (el Worker). Los registros
+pasan por un filtro que borra claves (apikey=, X-API-Key, token...).
 
 Arranque:  uvicorn api:app --host 127.0.0.1 --port 8091 --workers 1
 (UN solo worker: la memoria SQLite y el limitador de datos son por proceso.)
@@ -27,6 +29,7 @@ import contextlib
 import hmac
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 
@@ -48,6 +51,48 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("ordersblock.api")
 
+# Ningun registro debe guardar claves. requests incluye la URL completa (con ?apikey=...) en el
+# texto de sus excepciones, y esas excepciones se registran: este filtro las borra en todos los modulos.
+_PATRON_SECRETO = re.compile(r"(?i)\b(apikey|api_key|api-key|x-api-key|token|access_token|secret|password|clave)\b(\s*[=:]\s*|%3D)([^&\s'\"]+)")
+
+
+def _limpiar(texto: str) -> str:
+    return _PATRON_SECRETO.sub(lambda m: m.group(1) + m.group(2) + "***", texto)
+
+
+class FiltroSecretos(logging.Filter):
+    """Borra claves del mensaje y tambien de la traza de la excepcion (logger.exception), que es donde
+    requests deja la URL completa con ?apikey=..."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            texto = record.getMessage()
+            limpio = _limpiar(texto)
+            if limpio != texto:
+                record.msg, record.args = limpio, ()
+            if record.exc_info and not record.exc_text:
+                record.exc_text = logging.Formatter().formatException(record.exc_info)
+            if record.exc_text:
+                record.exc_text = _limpiar(record.exc_text)
+            if record.stack_info:
+                record.stack_info = _limpiar(record.stack_info)
+        except Exception:
+            pass
+        return True
+
+
+def _instalar_filtro_secretos() -> None:
+    raiz = logging.getLogger()
+    for h in raiz.handlers:
+        if not any(isinstance(f, FiltroSecretos) for f in h.filters):
+            h.addFilter(FiltroSecretos())
+    for nombre in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        for h in logging.getLogger(nombre).handlers:
+            if not any(isinstance(f, FiltroSecretos) for f in h.filters):
+                h.addFilter(FiltroSecretos())
+
+
+_instalar_filtro_secretos()
+
 API_KEY = os.getenv("ORDERSBLOCK_API_KEY", "").strip()
 ORIGENES = [o.strip() for o in os.getenv(
     "ORDERSBLOCK_CORS", "https://ordersblock.com,https://www.ordersblock.com").split(",") if o.strip()]
@@ -64,8 +109,13 @@ _ventanas: dict = {}
 
 
 def _cliente(request: Request) -> str:
-    return (request.headers.get("X-Usuario")
-            or request.headers.get("CF-Connecting-IP")
+    """Clave del limite por minuto. X-Usuario solo vale si la peticion trae la API key (el Worker reparte
+    asi su cupo por usuario); en rutas publicas cualquiera podria inventarlo y saltarse el limite.
+    CF-Connecting-IP la pone Cloudflare y es fiable cuando el origen solo acepta trafico de Cloudflare
+    (nginx con allow de sus rangos, o Cloudflare Tunnel)."""
+    if API_KEY and request.headers.get("X-Usuario") and _autorizado(request):
+        return "u:" + request.headers.get("X-Usuario", "")[:80]
+    return (request.headers.get("CF-Connecting-IP")
             or (request.client.host if request.client else "anon"))
 
 
@@ -84,9 +134,16 @@ def _limite_ok(cliente: str) -> bool:
 
 
 def _autorizado(request: Request) -> bool:
+    # Falla cerrado: sin clave configurada nadie pasa (antes quedaba todo abierto).
     if not API_KEY:
-        return True
+        return False
     return hmac.compare_digest(request.headers.get("X-API-Key", ""), API_KEY)
+
+
+def _error_clave() -> JSONResponse:
+    if not API_KEY:
+        return _error(503, "Servicio sin clave configurada (ORDERSBLOCK_API_KEY).")
+    return _error(401, "Falta o es inválida la cabecera X-API-Key.")
 
 
 def _error(codigo: int, mensaje: str) -> JSONResponse:
@@ -95,7 +152,7 @@ def _error(codigo: int, mensaje: str) -> JSONResponse:
 
 async def _ejecutar(request: Request, funcion, *args, **kwargs) -> JSONResponse:
     if not _autorizado(request):
-        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+        return _error_clave()
     cliente = _cliente(request)
     if not _limite_ok(cliente):
         return _error(429, f"Máximo {LIMITE_POR_MINUTO} consultas por minuto.")
@@ -132,7 +189,7 @@ async def salud(request: Request):
 
 async def mercados(request: Request):
     if not _autorizado(request):
-        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+        return _error_clave()
     return JSONResponse({"ok": True, "datos": servicio.mercados_disponibles()})
 
 
@@ -159,7 +216,7 @@ async def prediccion(request: Request):
 async def bloques(request: Request):
     """Los vencimientos de reloj vigentes, para pintar los botones en la app."""
     if not _autorizado(request):
-        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+        return _error_clave()
     out = []
     for h in predicciones.HORIZONTES:
         v = predicciones.proximo_vencimiento(h)
@@ -171,7 +228,7 @@ async def bloques(request: Request):
 async def oportunidades(request: Request):
     """Ranking del escáner: mercados con esperanza positiva y consenso suficiente, ya calculados."""
     if not _autorizado(request):
-        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+        return _error_clave()
     try:
         n = int(request.query_params.get("n", "5"))
     except ValueError:
@@ -196,14 +253,26 @@ async def velas_ruta(request: Request):
     Sale de la misma caché que usa el motor; una pasada por mercado y temporalidad cada 60 s como mucho."""
     if not _limite_ok(_cliente(request)):
         return _error(429, "Demasiadas consultas; espera un minuto.")
-    mercado = servicio.engine.normalizar_mercado(request.path_params["mercado"])
+    crudo = str(request.path_params["mercado"])[:20]
+    mercado = servicio.engine.normalizar_mercado(crudo)
+    # Solo mercados que el motor conoce: un simbolo inventado podia gastar la cuota de Twelve Data.
+    # Las cripto con sufijo USD (SOLUSD, XRPUSD...) se piden por su simbolo base, que va por Bybit (gratis);
+    # antes caian en Twelve Data y gastaban cuota.
+    if mercado not in ("DXY", "USDX") and not servicio.engine.plan_requerido(crudo):
+        base = mercado[:-3] if mercado.endswith("USD") else ""
+        if base and base in servicio.engine.CRIPTO_AMPLIADO:
+            mercado = base
+        else:
+            return _error(404, "Mercado desconocido.")
     tf = str(request.query_params.get("tf", "60"))
     if tf not in _TF_A_INTERVALO:
         return _error(400, "tf debe ser 15, 60, 240 o 1440")
     try:
-        n = max(50, min(300, int(request.query_params.get("n", "200"))))
+        n_pedido = int(request.query_params.get("n", "200"))
     except ValueError:
-        n = 200
+        n_pedido = 200
+    # Tamaños fijos: cada n distinto era una entrada nueva de cache y una descarga nueva
+    n = min((100, 160, 200, 300), key=lambda x: abs(x - n_pedido))
     # Índice del dólar para el panel de correlación del oro: Yahoo o calculado con Kraken (dxy.py)
     if mercado in ("DXY", "USDX"):
         try:
@@ -243,7 +312,7 @@ async def velas_ruta(request: Request):
 
 async def memoria_ruta(request: Request):
     if not _autorizado(request):
-        return _error(401, "Falta o es inválida la cabecera X-API-Key.")
+        return _error_clave()
     m = request.query_params.get("mercado")
     return JSONResponse({"ok": True, "datos": memoria.resumen(m.upper() if m else None)})
 
@@ -274,7 +343,11 @@ async def _ciclo_de_vida(app):
         escaner.arrancar()
     if os.getenv("ORDERSBLOCK_SIN_PRECIOS") != "1":
         precios.arrancar()
-    logger.info(f"ordersblock-analisis listo (API key {'activa' if API_KEY else 'DESACTIVADA'})")
+    _instalar_filtro_secretos()
+    if API_KEY:
+        logger.info("ordersblock-analisis listo (API key activa)")
+    else:
+        logger.critical("ORDERSBLOCK_API_KEY no esta definida: las rutas privadas responden 503 hasta configurarla")
     try:
         yield
     finally:

@@ -1,0 +1,20 @@
+# Avisos y PR automaticos cuando una libreria del motor tiene version nueva o fallo de seguridad.
+# Los PR NO se despliegan solos: el droplet solo cambia con despliegue/seguridad/1_codigo_y_dependencias.sh.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:17"
+      timezone: "America/Bogota"
+    open-pull-requests-limit: 5
+    labels: ["dependencias"]
+    groups:
+      menores:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
