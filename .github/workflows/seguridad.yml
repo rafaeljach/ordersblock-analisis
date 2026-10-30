@@ -1,0 +1,38 @@
+# Revision semanal de vulnerabilidades (pip-audit) y pruebas del motor en cada cambio.
+name: seguridad
+on:
+  push:
+    branches: [main, "seguridad-*"]
+  pull_request:
+  schedule:
+    - cron: "23 13 * * 1"   # lunes 08:23 Bogota
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  auditar:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: "3.12"
+            req: requirements.txt
+          - python: "3.10"
+            req: requirements-py310.txt
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Instalar
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r ${{ matrix.req }} httpx pip-audit==2.10.1
+      - name: Vulnerabilidades conocidas (pip-audit)
+        run: pip-audit -r ${{ matrix.req }} --strict --progress-spinner off
+      - name: Pruebas del motor
+        run: |
+          for t in tests/test_*.py; do
+            echo "== $t"; ORDERSBLOCK_DB=$RUNNER_TEMP/t.db python -I "$t" | tail -1 | grep -q "TODO OK" || { python -I "$t" | tail -20; exit 1; }
+          done

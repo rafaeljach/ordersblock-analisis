@@ -12,7 +12,7 @@ import api, servicio
 llamadas = []
 def falso(mercado, interval, n, prioridad=None):
     llamadas.append((mercado, interval, n))
-    if mercado == "ZZZ": raise ValueError("no existe")
+    if mercado in ("ZZZ", "SOL"): raise ValueError("no existe")
     return {"precio_actual": 4056.3, "fuente_datos": "bybit", "velas": [
         {"datetime": "2026-10-22 10:00:00", "open": 4050.0, "high": 4060.0, "low": 4045.0, "close": 4056.3},
         {"datetime": "2026-10-22 11:00:00", "open": 4056.3, "high": 4061.0, "low": 4050.0, "close": 4058.0}]}
@@ -31,6 +31,8 @@ with TestClient(api.app) as cl:
     ok &= chk("3. Segunda peticion en 60 s: sale de cache (el motor no se vuelve a llamar)", len(llamadas) == 1)
     r = cl.get("/velas/BTC?tf=240"); ok &= chk("4. tf=240 -> 4h, n por defecto 200", llamadas[-1] == ("BTC", "4h", 200))
     r = cl.get("/velas/BTC?tf=7"); ok &= chk("5. tf invalido: 400", r.status_code == 400)
-    r = cl.get("/velas/ZZZ?tf=60"); ok &= chk("6. Mercado sin velas: 503 con mensaje", r.status_code == 503 and "ZZZ" in r.json()["error"])
+    antes = len(llamadas)
+    r = cl.get("/velas/ZZZ?tf=60"); ok &= chk("6. Mercado inventado: 404 sin llamar al motor (seguridad 2026-10-30)", r.status_code == 404 and len(llamadas) == antes, (r.status_code, len(llamadas) - antes))
+    r = cl.get("/velas/SOL?tf=60"); ok &= chk("6b. Mercado real cuyo motor falla: 503 con mensaje", r.status_code == 503 and "SOL" in r.json()["error"], r.status_code)
     r = cl.get("/velas/EURUSD?tf=60&n=9999"); ok &= chk("7. n se acota a 300", llamadas[-1][2] == 300)
     print("\nTODO OK" if ok else "\nHAY FALLAS"); sys.exit(0 if ok else 1)
