@@ -97,7 +97,9 @@ DOMINIOS_RADAR = {
 # Palabra o frase exacta; con * al final cuenta como raiz (sanction* = sanction, sanctions, sanctioned)
 _ALTO = [
     "war", "wars", "missile*", "airstrike*", "air strike*", "strikes", "strike on", "invasion", "invad*",
-    "nuclear", "attack*", "explosion*", "coup", "martial law", "assassinat*", "ceasefire", "truce", "sanction*",
+    "nuclear", "attack*", "explosion*", "coup", "coups", "martial law", "assassinat*", "ceasefire", "truce", "sanction*",
+    "constitutional crisis", "impeach*", "curfew", "state of siege", "government collapse*", "snap election*",
+    "crisis constitucional", "autogolpe", "estado de sitio", "toque de queda", "destitucion", "juicio politico",
     "embargo", "blockade", "hormuz", "red sea", "taiwan strait", "mobiliz*", "state of emergency",
     "declares emergency", "default*", "rate cut*", "rate hike*", "emergency meeting", "hack*", "exploit*",
     "breaking", "urgent",
@@ -116,7 +118,8 @@ _MEDIO = [
 _ACTIVOS = {
     "XAU": ["gold", "bullion", "safe haven", "oro", "ouro", "war", "guerra", "missile*", "misil*", "nuclear",
             "sanction*", "sancion*", "central bank buying", "attack*", "ataque*", "strikes", "airstrike*", "invasion",
-            "ceasefire", "truce", "alto el fuego", "cessar fogo", "escalat*", "escalada"],
+            "ceasefire", "truce", "alto el fuego", "cessar fogo", "escalat*", "escalada", "coup", "golpe de estado",
+            "constitutional crisis", "crisis constitucional"],
     "USD": ["fed", "federal reserve", "fomc", "powell", "treasury", "treasuries", "yields", "dollar", "dolar",
             "payrolls", "cpi", "jobs report", "nonfarm", "white house", "casa blanca", "tariff*", "arancel*"],
     "OIL": ["oil", "crude", "brent", "wti", "opec*", "petroleo", "hormuz", "red sea", "houthi*", "saudi*", "iran*",
@@ -177,6 +180,18 @@ def inicializar(ruta: str = None) -> None:
             nuevos INTEGER DEFAULT 0, fallos INTEGER DEFAULT 0, etag TEXT, modificado TEXT
         );
         """)
+        if "politica" not in [r[1] for r in c.execute("PRAGMA table_info(noticias)")]:
+            c.execute("ALTER TABLE noticias ADD COLUMN politica INTEGER NOT NULL DEFAULT 0")
+        # Reclasificar lo guardado con las reglas actuales (unos miles de titulares: milisegundos).
+        # Asi un cambio de palabras clave vale tambien para lo que ya estaba en la base.
+        cambios = []
+        for nid, titulo, cat, imp, act, pol in c.execute("SELECT id, titulo, categoria, impacto, activos, politica FROM noticias"):
+            i2, a2 = clasificar(titulo, cat)
+            p2 = es_politica(titulo, cat)
+            if (i2, a2, p2) != (imp, act, pol):
+                cambios.append((i2, a2, p2, nid))
+        if cambios:
+            c.executemany("UPDATE noticias SET impacto=?, activos=?, politica=? WHERE id=?", cambios)
 
 
 # ---------------------------------------------------------------- utilidades de texto
@@ -256,7 +271,24 @@ def _patron(palabras) -> re.Pattern:
     return re.compile("|".join(partes))
 
 
+# Politica y gobiernos (filtro "Gobiernos"): vale para cualquier fuente, no solo las oficiales
+_POLITICA = [
+    "president*", "prime minister*", "premier", "parliament*", "congress*", "senate", "senator*", "government*",
+    "cabinet", "minister*", "election*", "vote", "votes", "voting", "referendum", "coup", "coups", "constitution*",
+    "impeach*", "opposition", "protest*", "regime", "dictator*", "supreme court", "martial law", "chancellor",
+    "kremlin", "white house", "downing street", "elysee", "nato summit", "g7", "g20", "un security council",
+    "presidente*", "primer ministro", "primera ministra", "parlamento", "congreso", "senado", "gobierno*",
+    "gabinete", "ministr*", "eleccion*", "elecciones", "votacion*", "referendo", "referendum", "golpe de estado",
+    "autogolpe", "constitucion*", "destitucion", "juicio politico", "oposicion", "protesta*", "regimen",
+    "dictad*", "corte suprema", "tribunal supremo", "casa blanca", "consejo de seguridad",
+    "governo", "eleicoes", "eleicao", "golpe", "parlamento", "congresso", "ministro*",
+]
 _RE_ALTO, _RE_MEDIO = _patron(_ALTO), _patron(_MEDIO)
+_RE_POLITICA = _patron(_POLITICA)
+
+
+def es_politica(titulo: str, categoria: str) -> int:
+    return 1 if categoria == "oficial" or _RE_POLITICA.search(normalizar(titulo)) else 0
 _RE_ACTIVOS = {a: _patron(p) for a, p in _ACTIVOS.items()}
 
 
@@ -384,13 +416,14 @@ def guardar(items: list, ruta: str = None) -> int:
                          (clave, norm, ahora - 86400)).fetchone():
                 continue
             impacto, activos = clasificar(it["titulo"], it["categoria"])
+            politica = es_politica(it["titulo"], it["categoria"])
             t = {"es": None, "en": None, "pt": None}
             if it["idioma"] in t:
                 t[it["idioma"]] = it["titulo"]
             cur = c.execute("""INSERT OR IGNORE INTO noticias (clave, titulo_norm, fuente_id, fuente, idioma, categoria, titulo,
-                         enlace, publicado, recibido, impacto, activos, t_es, t_en, t_pt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         enlace, publicado, recibido, impacto, activos, t_es, t_en, t_pt, politica) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (clave, norm, it["fuente_id"], it["fuente"], it["idioma"], it["categoria"], it["titulo"], it["enlace"],
-                       it["publicado"], ahora, impacto, activos, t["es"], t["en"], t["pt"]))
+                       it["publicado"], ahora, impacto, activos, t["es"], t["en"], t["pt"], politica))
             nuevos += max(cur.rowcount, 0)
     return nuevos
 
@@ -447,7 +480,8 @@ def consultar(idioma: str = "es", categoria: str = "", solo_alto: bool = False, 
     n = max(1, min(int(n or 60), 150))
     sql = "SELECT * FROM noticias WHERE id > ?"
     args = [int(desde_id or 0)]
-    if categoria in CATEGORIAS:
+    filtro_gob = categoria == "oficial"          # boton "Gobiernos": oficiales + politica de cualquier fuente
+    if categoria in CATEGORIAS and not filtro_gob:
         sql += " AND categoria = ?"
         args.append(categoria)
     if solo_alto:
@@ -459,6 +493,10 @@ def consultar(idioma: str = "es", categoria: str = "", solo_alto: bool = False, 
     args.append(n)
     try:
         with _leer(ruta) as c:
+            if filtro_gob:
+                # Mientras el servicio de noticias no haya migrado la base (columna nueva), solo las oficiales
+                tiene = "politica" in [r[1] for r in c.execute("PRAGMA table_info(noticias)")]
+                sql = sql.replace("WHERE id > ?", "WHERE id > ? AND " + ("(categoria = 'oficial' OR politica = 1)" if tiene else "categoria = 'oficial'"))
             filas = c.execute(sql, args).fetchall()
             ultimo = c.execute("SELECT MAX(id), MAX(recibido) FROM noticias").fetchone()
     except sqlite3.OperationalError:     # base aun no creada: el servicio de noticias no ha corrido
