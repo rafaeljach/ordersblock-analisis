@@ -168,4 +168,28 @@ chk("33. Glosario: 'rate cuts' -> 'interest rate cuts', 'hits record high', Fed,
     and pr("Gold hits record high", "en") == "Gold reaches a new record high" and pr("Fedex shares tumble", "en") == "Fedex shares fall sharply"
     and pr("Oil jumps 4%", "en") == "Oil rises 4%" and pr("La Fed sube tasas", "es") == "La Fed sube tasas")
 ids = [f[0] for f in noticias.FUENTES]
+
+# 9. Filtro "Gobiernos": oficiales + politica de cualquier fuente; migracion de bases viejas
+chk("34. Politica: 'Poland's president joins protest amid constitutional crisis' = ALTO, oro y gobiernos",
+    noticias.clasificar("Poland's president joins protest amid constitutional crisis", "geopolitica") == (2, "XAU")
+    and noticias.es_politica("Poland's president joins protest amid constitutional crisis", "geopolitica") == 1
+    and noticias.es_politica("Golpe de estado en Polonia", "geopolitica") == 1 and noticias.es_politica("Gold hits record high", "mercados") == 0)
+vieja = os.path.join(TMP, "vieja.db")
+cv = connect(vieja)
+cv.executescript("""CREATE TABLE noticias (id INTEGER PRIMARY KEY AUTOINCREMENT, clave TEXT UNIQUE NOT NULL, titulo_norm TEXT NOT NULL,
+  fuente_id TEXT NOT NULL, fuente TEXT NOT NULL, idioma TEXT NOT NULL, categoria TEXT NOT NULL, titulo TEXT NOT NULL, enlace TEXT NOT NULL,
+  publicado INTEGER NOT NULL, recibido INTEGER NOT NULL, impacto INTEGER NOT NULL DEFAULT 0, activos TEXT NOT NULL DEFAULT '', t_es TEXT, t_en TEXT, t_pt TEXT);""")
+ahora_i = int(time.time())
+cv.execute("INSERT INTO noticias (clave,titulo_norm,fuente_id,fuente,idioma,categoria,titulo,enlace,publicado,recibido,impacto,activos) VALUES ('a','x','aljazeera','Al Jazeera','en','geopolitica',?, 'https://a/1', ?, ?, 1, '')",
+           ("Poland's president joins protest amid constitutional crisis", ahora_i, ahora_i))
+cv.execute("INSERT INTO noticias (clave,titulo_norm,fuente_id,fuente,idioma,categoria,titulo,enlace,publicado,recibido,impacto,activos) VALUES ('b','y','wh','Casa Blanca','en','oficial','Statement on trade','https://a/2', ?, ?, 1, '')", (ahora_i - 5, ahora_i))
+cv.commit(); cv.close()
+antes = noticias.consultar("en", categoria="oficial", ruta=vieja)["noticias"]
+chk("35. Base vieja sin migrar: 'Gobiernos' no falla y muestra solo las oficiales", [x["fuente"] for x in antes] == ["Casa Blanca"], [x["fuente"] for x in antes])
+noticias.inicializar(vieja)
+despues = noticias.consultar("en", categoria="oficial", ruta=vieja)["noticias"]
+pol = next((x for x in despues if x["fuente"] == "Al Jazeera"), None)
+chk("36. Tras migrar: 'Gobiernos' trae la crisis de Polonia (de Al Jazeera) y se reclasifica a ALTO con oro",
+    pol is not None and pol["impacto"] == 2 and pol["activos"] == ["XAU"] and len(despues) == 2, [(x["fuente"], x["impacto"], x["activos"]) for x in despues])
+chk("37. Las demas categorias siguen filtrando por fuente", [x["fuente"] for x in noticias.consultar("en", categoria="geopolitica", ruta=vieja)["noticias"]] == ["Al Jazeera"])
 print("\nTODO OK" if ok else "\nHAY FALLAS"); sys.exit(0 if ok else 1)
