@@ -150,4 +150,22 @@ try:
 except ValueError:
     chk("29. Paquete con rutas '../' rechazado", not os.path.exists(os.path.join(TMP, "..", "fuera.txt")))
 
+# 8. Ajustes tras la prueba en el droplet
+try:
+    noticias.parsear_xml(b"<!DOCTYPE html><html><head></head><body>investingLive</body></html>")
+    chk("30. Una pagina web en lugar de un feed da un error claro (no '0 titulares' callado)", False)
+except ValueError as e:
+    chk("30. Una pagina web en lugar de un feed da un error claro (no '0 titulares' callado)", "pagina web" in str(e))
+chk("31. GDELT vacio ('{}' o nada) = sin titulares, sin error", noticias.parsear_gdelt(b"{}") == [] and noticias.parsear_gdelt(b"") == [])
+try:
+    noticias.parsear_gdelt(b"Please limit requests to one every 5 seconds")
+    chk("32. GDELT con texto de error: se informa el texto", False)
+except ValueError as e:
+    chk("32. GDELT con texto de error: se informa el texto", "limit requests" in str(e))
+pr = traductor.preparar
+chk("33. Glosario: 'rate cuts' -> 'interest rate cuts', 'hits record high', Fed, sin tocar Fedex ni el espanol",
+    pr("Fed's Powell says rate cuts are not guaranteed", "en") == "Federal Reserve Powell says interest rate cuts are not guaranteed"
+    and pr("Gold hits record high", "en") == "Gold reaches a new record high" and pr("Fedex shares tumble", "en") == "Fedex shares fall sharply"
+    and pr("Oil jumps 4%", "en") == "Oil rises 4%" and pr("La Fed sube tasas", "es") == "La Fed sube tasas")
+ids = [f[0] for f in noticias.FUENTES]
 print("\nTODO OK" if ok else "\nHAY FALLAS"); sys.exit(0 if ok else 1)
