@@ -17,8 +17,9 @@ case "${1:-}" in
   --aplicar) MODO=aplicar ;;
   --revertir) MODO=revertir; DIR_REVERTIR="${2:-}" ;;
   --cerrar80) MODO=cerrar80 ;;
+  --probar) MODO=probar ;;
   ""|--revisar) MODO=revisar ;;
-  *) echo "Uso: $0 [--revisar | --aplicar | --revertir <carpeta_de_respaldo>] (4_tunel.sh admite ademas --cerrar80)"; exit 2 ;;
+  *) echo "Uso: $0 [--revisar | --aplicar | --revertir <carpeta_de_respaldo>] (4_tunel.sh admite --cerrar80; noticias/instalar.sh admite --probar)"; exit 2 ;;
 esac
 
 info(){ echo "· $*"; }
