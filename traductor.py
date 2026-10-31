@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import os
+import re
 import resource
 import shutil
 import sqlite3
@@ -52,6 +53,7 @@ class Par:
     """Un modelo cargado: traduce listas de titulares de o -> d."""
 
     def __init__(self, o: str, d: str):
+        self.origen = o
         import ctranslate2
         import sentencepiece as spm
         c = carpeta_par(o, d)
@@ -63,7 +65,7 @@ class Par:
                                          inter_threads=1, intra_threads=int(os.getenv("ORDERSBLOCK_TRADUCTOR_HILOS", "1")))
 
     def traducir(self, textos: list) -> list:
-        tokens = [self.sp.encode(t, out_type=str) for t in textos]
+        tokens = [self.sp.encode(preparar(t, self.origen), out_type=str) for t in textos]
         pref = [[self.prefijo]] * len(tokens) if self.prefijo else None
         res = self.tr.translate_batch(tokens, target_prefix=pref, replace_unknowns=True, max_batch_size=LOTE,
                                       beam_size=2, num_hypotheses=1, length_penalty=0.2, max_decoding_length=160)
@@ -79,6 +81,30 @@ class Par:
         self.tr = None
         self.sp = None
         gc.collect()
+
+
+# Glosario de mercado: se reescribe el ingles ANTES de traducir para que el modelo no confunda terminos
+# (el titular original se guarda intacto). Ej.: "rate cuts" salia como "recortes de tarifas".
+_GLOSARIO_EN = [
+    (r"\bFed's\b", "Federal Reserve"), (r"\bthe Fed\b", "the Federal Reserve"), (r"\bFed\b", "Federal Reserve"),
+    (r"\brate (cut|cuts|hike|hikes|decision|decisions)\b", r"interest rate \1"),
+    (r"\bhits? (a |an )?(fresh |new )?record high\b", "reaches a new record high"),
+    (r"\bhits? (a |an )?(fresh |new )?record low\b", "falls to a new record low"),
+    (r"\bhits? (a |an )?(\d+[- ](week|month|year)) (high|low)\b", r"reaches a \2 \4"),
+    (r"\bsoar(s?)\b", r"rise\1 sharply"), (r"\bplunge(s?)\b", r"fall\1 sharply"), (r"\btumble(s?)\b", r"fall\1 sharply"),
+    (r"\bjump(s?)\b", r"rise\1"), (r"\bslump(s?)\b", r"fall\1"), (r"\brallies\b", "rises"), (r"\brally\b", "rise"),
+    (r"\bbps\b", "basis points"), (r"\bYoY\b", "year on year"), (r"\bMoM\b", "month on month"),
+    (r"\bNFP\b", "US jobs report"), (r"\bCPI\b", "consumer price index"),
+]
+_RX_GLOSARIO = [(re.compile(a, re.I), b) for a, b in _GLOSARIO_EN]
+
+
+def preparar(texto: str, origen: str) -> str:
+    if origen != "en":
+        return texto
+    for rx, sustituto in _RX_GLOSARIO:
+        texto = rx.sub(sustituto, texto)
+    return texto
 
 
 def _aceptable(original: str, traducido: str) -> bool:

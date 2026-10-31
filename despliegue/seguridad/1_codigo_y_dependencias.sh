@@ -14,7 +14,7 @@ if [ "$MODO" = revertir ]; then
   info "Volviendo al commit $ANT y a las librerias anteriores"
   G checkout -q "$ANT"
   rm -rf "$APP/venv" && cp -a "$DIR_REVERTIR/venv" "$APP/venv"; normalizar_dueno
-  systemctl restart "$SVC"; salud && ok "Revertido" || falla "Revertido pero el motor no responde: revisa journalctl -u $SVC"
+  systemctl restart "$SVC"; reiniciar_noticias; salud && ok "Revertido" || falla "Revertido pero el motor no responde: revisa journalctl -u $SVC"
   exit 0
 fi
 
@@ -55,7 +55,7 @@ MARCA=$(date '+%Y-%m-%d %H:%M:%S')
 G checkout -q "$REF"
 "$APP/venv/bin/pip" install -q -r "$APP/$REQ"
 normalizar_dueno
-systemctl restart "$SVC"
+systemctl restart "$SVC"; reiniciar_noticias
 
 # 4) Verificar; si algo falla, volver atras solo
 if salud && sleep 5 && sin_errores_desde "$MARCA"; then
@@ -64,6 +64,6 @@ if salud && sleep 5 && sin_errores_desde "$MARCA"; then
 else
   falla "Algo fallo: volviendo atras automaticamente"
   G checkout -q "$(cat "$R/commit")"; rm -rf "$APP/venv" && cp -a "$R/venv" "$APP/venv"; normalizar_dueno
-  systemctl restart "$SVC"; salud && ok "Revertido; produccion como antes" || falla "Revisa journalctl -u $SVC"
+  systemctl restart "$SVC"; reiniciar_noticias; salud && ok "Revertido; produccion como antes" || falla "Revisa journalctl -u $SVC"
   exit 1
 fi

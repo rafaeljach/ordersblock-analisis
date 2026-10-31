@@ -43,6 +43,9 @@ normalizar_dueno(){
   if [ -d "$APP/venv" ]; then v=$(stat -c %u:%g "$APP/venv"); chown -R "$v" "$APP/venv"; fi
 }
 
+# El servicio de noticias usa el mismo codigo del motor: si esta instalado, se reinicia con el
+reiniciar_noticias(){ if systemctl is-active --quiet ordersblock-noticias 2>/dev/null; then systemctl restart ordersblock-noticias; info "Servicio de noticias reiniciado con el codigo nuevo"; fi; return 0; }
+
 clave_api(){ grep -E "^ORDERSBLOCK_API_KEY=" "$APP/.env" | head -1 | cut -d= -f2- | tr -d '"'"'"' '; }
 
 # Salud del motor: local y, si se pide, a traves de Cloudflare. Devuelve 0 si todo responde.

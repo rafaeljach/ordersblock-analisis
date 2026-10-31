@@ -48,9 +48,10 @@ UA = "ordersblock-noticias/1.0 (+https://ordersblock.com; titulares con enlace a
 
 # (id, nombre, url, idioma, categoria, cada_seg). Categorias: mercados, geopolitica, bancos, oficial, defensa, cripto, radar
 FUENTES = [
-    # Minuto a minuto, lo que mueve el mercado
-    ("investinglive", "investingLive", "https://investinglive.com/rss/", "en", "mercados", 60),
-    ("fxstreet", "FXStreet", "https://www.fxstreet.com/rss/news", "en", "mercados", 90),
+    # Minuto a minuto, lo que mueve el mercado (investingLive ya no publica RSS y FXStreet bloquea lectores: fuera)
+    ("cnbc_world", "CNBC", "https://www.cnbc.com/id/100727362/device/rss/rss.html", "en", "mercados", 90),
+    ("cnbc_markets", "CNBC Mercados", "https://www.cnbc.com/id/20910258/device/rss/rss.html", "en", "mercados", 90),
+    ("marketwatch", "MarketWatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories", "en", "mercados", 120),
     # Geopolitica mundial
     ("aljazeera", "Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", "en", "geopolitica", 120),
     ("bbc_world", "BBC World", "https://feeds.bbci.co.uk/news/world/rss.xml", "en", "geopolitica", 120),
@@ -65,21 +66,20 @@ FUENTES = [
     ("france24_es", "France 24 Español", "https://www.france24.com/es/rss", "es", "geopolitica", 180),
     ("dw_es", "DW Español", "https://rss.dw.com/rdf/rss-sp-all", "es", "geopolitica", 300),
     # Oficiales y bancos centrales
-    ("whitehouse", "Casa Blanca", "https://www.whitehouse.gov/feed/", "en", "oficial", 300),
+    ("whitehouse", "Casa Blanca", "https://www.whitehouse.gov/briefings-statements/feed/", "en", "oficial", 300),
     ("fed", "Reserva Federal", "https://www.federalreserve.gov/feeds/press_all.xml", "en", "bancos", 300),
     ("fed_discursos", "Fed – discursos", "https://www.federalreserve.gov/feeds/speeches.xml", "en", "bancos", 600),
     ("ecb", "BCE", "https://www.ecb.europa.eu/rss/press.html", "en", "bancos", 300),
-    ("boe", "Banco de Inglaterra", "https://www.bankofengland.co.uk/boeapps/rss/feeds.aspx?feed=News", "en", "bancos", 600),
+    ("boe", "Banco de Inglaterra", "https://www.bankofengland.co.uk/rss/news", "en", "bancos", 600),
     # Defensa y conflictos
     ("defensenews", "Defense News", "https://www.defensenews.com/arc/outboundfeeds/rss/?outputType=xml", "en", "defensa", 300),
-    ("breakingdefense", "Breaking Defense", "https://breakingdefense.com/feed/", "en", "defensa", 300),
     ("twz", "The War Zone", "https://www.twz.com/feed", "en", "defensa", 300),
     ("foreignpolicy", "Foreign Policy", "https://foreignpolicy.com/feed/", "en", "defensa", 600),
     # Cripto
     ("coindesk", "CoinDesk", "https://www.coindesk.com/arc/outboundfeeds/rss/", "en", "cripto", 180),
     ("cointelegraph", "Cointelegraph", "https://cointelegraph.com/rss", "en", "cripto", 180),
     # Radar global (GDELT: monitoreo abierto de noticias del mundo; solo dominios de confianza)
-    ("gdelt", "Radar GDELT", "https://api.gdeltproject.org/api/v2/doc/doc?query=(war%20OR%20missile%20OR%20sanctions%20OR%20invasion%20OR%20ceasefire%20OR%20coup%20OR%20nuclear%20OR%20OPEC%20OR%20tariffs)%20sourcelang:english&mode=artlist&format=json&maxrecords=75&timespan=30min&sort=datedesc",
+    ("gdelt", "Radar GDELT", "https://api.gdeltproject.org/api/v2/doc/doc?query=(war%20OR%20missile%20OR%20sanctions%20OR%20invasion%20OR%20ceasefire%20OR%20coup%20OR%20nuclear%20OR%20OPEC%20OR%20tariffs)%20sourcelang:english&mode=artlist&format=json&maxrecords=75&timespan=60min&sort=datedesc",
      "en", "radar", 300),
 ]
 # Solo para el radar GDELT: medios reconocidos (GDELT trae de todo, incluidos sitios de baja calidad)
@@ -276,6 +276,8 @@ def _texto(e):
 
 def parsear_xml(contenido: bytes) -> list:
     """RSS 2.0, RSS 1.0 (RDF) y Atom con la libreria estandar. Devuelve [{titulo, enlace, fecha}]."""
+    if contenido.lstrip()[:200].lower().startswith((b"<!doctype html", b"<html")):
+        raise ValueError("la direccion devuelve una pagina web, no un feed RSS")
     raiz = ET.fromstring(contenido)
     salida = []
     for nodo in raiz.iter():
@@ -306,7 +308,12 @@ def parsear_xml(contenido: bytes) -> list:
 
 
 def parsear_gdelt(contenido: bytes) -> list:
-    d = json.loads(contenido.decode("utf-8", "replace") or "{}")
+    texto = contenido.decode("utf-8", "replace").strip()
+    if not texto or texto == "{}":
+        return []                                  # GDELT responde vacio cuando no hay articulos en la ventana
+    if not texto.startswith("{"):
+        raise ValueError("GDELT respondio: " + texto[:120])
+    d = json.loads(texto)
     salida = []
     for a in (d.get("articles") or [])[:MAX_POR_FUENTE * 2]:
         url = a.get("url") or ""
