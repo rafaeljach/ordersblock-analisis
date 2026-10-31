@@ -1,5 +1,8 @@
 # Versiones fijadas el 2026-10-30 para Python 3.10 (starlette 1.8+ exige 3.11). pip-audit: 0 vulnerabilidades. Directas:
 numpy==2.1.3
+# Traductor local de noticias (modelos de Argos sobre CTranslate2; sin torch)
+ctranslate2==4.6.2
+sentencepiece==0.2.2
 requests==2.34.2
 starlette==1.7.0
 uvicorn==0.54.0
@@ -10,5 +13,6 @@ charset-normalizer==3.5.2
 click==8.5.0
 h11==0.16.0
 idna==3.20
+PyYAML==6.0.3
 typing_extensions==4.16.0
 urllib3==2.8.0

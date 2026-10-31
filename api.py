@@ -10,10 +10,12 @@ Endpoints (todos GET, respuesta JSON):
   /memoria?mercado=BTC                    fiabilidad verificada (lo que lleva aprendido)
   /oportunidades?excluir=EURUSD&n=5       dónde SÍ hay ventaja ahora (escáner en segundo plano)
   /precios                                cintillo: mercados principales (público, sin clave, caché 30 s)
+  /noticias?lang=es&cat=&alto=1&activo=XAU  titulares de geopolitica y mercados traducidos (público)
+  /noticias/estado                        salud del servicio de noticias (público)
   /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
   /velas/DXY?tf=60                         índice del dólar para el panel del oro (Yahoo o calculado con Kraken)
 
-Seguridad: toda ruta salvo /salud, /precios y /velas exige la cabecera
+Seguridad: toda ruta salvo /salud, /precios, /velas y /noticias exige la cabecera
 X-API-Key: <clave> (ORDERSBLOCK_API_KEY). Sin clave configurada el servicio
 FALLA CERRADO: esas rutas responden 503 en vez de quedar abiertas. Las rutas
 publicas limitan por la IP real que entrega Cloudflare (CF-Connecting-IP);
@@ -43,6 +45,7 @@ from starlette.routing import Route
 import dxy
 import escaner
 import memoria
+import noticias
 import precios
 import predicciones
 import servicio
@@ -244,6 +247,41 @@ async def precios_ruta(request: Request):
                         headers={"Cache-Control": "public, max-age=30"})
 
 
+_cache_noticias: dict = {}
+
+
+async def noticias_ruta(request: Request):
+    """Publico: titulares de geopolitica y mercados (solo titular, fuente, hora y enlace al original),
+    traducidos al idioma pedido. Los guarda el servicio ordersblock-noticias; aqui solo se leen."""
+    if not _limite_ok(_cliente(request)):
+        return _error(429, "Demasiadas consultas; espera un minuto.")
+    q = request.query_params
+    try:
+        desde = max(0, int(q.get("desde", "0") or 0))
+        n = max(1, min(150, int(q.get("n", "60") or 60)))
+    except ValueError:
+        return _error(400, "desde y n deben ser numeros")
+    params = (str(q.get("lang", "es"))[:2], str(q.get("cat", ""))[:12], q.get("alto") == "1",
+              str(q.get("activo", ""))[:3].upper(), desde, n)
+    ahora = time.time()
+    hit = _cache_noticias.get(params)
+    if hit and ahora - hit[0] < 10:
+        datos = hit[1]
+    else:
+        datos = await asyncio.to_thread(noticias.consultar, *params)
+        if len(_cache_noticias) > 500:
+            _cache_noticias.clear()
+        _cache_noticias[params] = (ahora, datos)
+    return JSONResponse({"ok": True, "datos": datos}, headers={"Cache-Control": "public, max-age=15"})
+
+
+async def noticias_estado_ruta(request: Request):
+    """Publico: salud del servicio de noticias (fuentes que responden, ultimo titular). Sin datos privados."""
+    if not _limite_ok(_cliente(request)):
+        return _error(429, "Demasiadas consultas; espera un minuto.")
+    return JSONResponse({"ok": True, "datos": await asyncio.to_thread(noticias.estado)})
+
+
 _TF_A_INTERVALO = {"15": "15min", "60": "1h", "240": "4h", "1440": "1day"}
 _cache_velas: dict = {}
 
@@ -369,6 +407,8 @@ app = Starlette(
         Route("/oportunidades", oportunidades),
         Route("/precios", precios_ruta),
         Route("/velas/{mercado}", velas_ruta),
+        Route("/noticias", noticias_ruta),
+        Route("/noticias/estado", noticias_estado_ruta),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],
