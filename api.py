@@ -12,6 +12,7 @@ Endpoints (todos GET, respuesta JSON):
   /precios                                cintillo: mercados principales (público, sin clave, caché 30 s)
   /noticias?lang=es&cat=&alto=1&activo=XAU  titulares de geopolitica y mercados traducidos (público)
   /noticias/estado                        salud del servicio de noticias (público)
+  /tasa/COP                               tasa USDT->COP (Binance P2P) para pagos con tarjeta (clave)
   /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
   /velas/DXY?tf=60                         índice del dólar para el panel del oro (Yahoo o calculado con Kraken)
 
@@ -47,6 +48,7 @@ import escaner
 import memoria
 import noticias
 import precios
+import tasa_cop
 import predicciones
 import servicio
 
@@ -275,6 +277,18 @@ async def noticias_ruta(request: Request):
     return JSONResponse({"ok": True, "datos": datos}, headers={"Cache-Control": "public, max-age=15"})
 
 
+async def tasa_ruta(request: Request):
+    """Privado (clave): tasa USDT->COP para cobrar con Bold. Solo COP por ahora."""
+    if not _autorizado(request):
+        return _error_clave()
+    if str(request.path_params["moneda"]).upper() != "COP":
+        return _error(404, "Moneda no soportada")
+    d = await asyncio.to_thread(tasa_cop.tasa_cop)
+    if not d["tasa"]:
+        return _error(503, "Sin tasa disponible")
+    return JSONResponse({"ok": True, "datos": d}, headers={"Cache-Control": "private, max-age=120"})
+
+
 async def noticias_estado_ruta(request: Request):
     """Publico: salud del servicio de noticias (fuentes que responden, ultimo titular). Sin datos privados."""
     if not _limite_ok(_cliente(request)):
@@ -409,6 +423,7 @@ app = Starlette(
         Route("/velas/{mercado}", velas_ruta),
         Route("/noticias", noticias_ruta),
         Route("/noticias/estado", noticias_estado_ruta),
+        Route("/tasa/{moneda}", tasa_ruta),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],
