@@ -192,4 +192,62 @@ pol = next((x for x in despues if x["fuente"] == "Al Jazeera"), None)
 chk("36. Tras migrar: 'Gobiernos' trae la crisis de Polonia (de Al Jazeera) y se reclasifica a ALTO con oro",
     pol is not None and pol["impacto"] == 2 and pol["activos"] == ["XAU"] and len(despues) == 2, [(x["fuente"], x["impacto"], x["activos"]) for x in despues])
 chk("37. Las demas categorias siguen filtrando por fuente", [x["fuente"] for x in noticias.consultar("en", categoria="geopolitica", ruta=vieja)["noticias"]] == ["Al Jazeera"])
+
+# 10. EUR, cumbres y destacadas (caso real 20 nov 2026: EUR traia futbol de Alemania; la cumbre Trump-Xi-Putin no salia)
+cl = noticias.clasificar
+chk("38. EUR: futbol y sociedad de Alemania ya NO son EUR; Lagarde, eurozona y lo que publica el BCE si",
+    "EUR" not in cl("Germany thrash Netherlands to book quarterfinal spot", "geopolitica")[1]
+    and "EUR" not in cl("La generación Z en Alemania alza la voz", "geopolitica")[1]
+    and "EUR" in cl("Lagarde warns Europe could miss chance to unify tokenized markets", "cripto")[1]
+    and "EUR" in cl("Boris Vujčić: Risks and resilience in the euro area financial system", "bancos")[1]
+    and cl("Philip R. Lane: The practice and science of monetary policy", "bancos", "ecb")[1] == "EUR"
+    and "EUR" not in cl("Houthis threaten shipping lane in Red Sea", "geopolitica")[1])
+cum = "La Coalición de Voluntarios se reúne en Alemania, tras la cumbre entre Trump, Xi y Putin"
+chk("39. Cumbre Trump, Xi y Putin = ALTO con oro, dolar y euro, y destacada",
+    cl(cum, "geopolitica") == (2, "XAU,USD,EUR") and noticias.es_destacada(cum), cl(cum, "geopolitica"))
+chk("40. Cumbres: G20, Trump con Zelensky, Xi en Moscu = ALTO; Trump en una fabrica o hablando del Super Bowl = no",
+    cl("G20 summit opens in Johannesburg", "geopolitica")[0] == 2 and cl("Trump meets Zelensky at White House", "geopolitica")[0] == 2
+    and cl("Xi Jinping visits Moscow", "geopolitica")[0] == 2 and cl("Trump visits a factory in Ohio", "geopolitica")[0] == 0
+    and cl("Trump posts about the Super Bowl", "geopolitica")[0] == 0)
+chk("41. Decision de tasas = ALTO y destacada (USD por ser de la Fed)",
+    cl("Fed holds rates steady, signals patience", "bancos", "fed") == (2, "USD") and noticias.es_destacada("Fed holds rates steady"))
+dd = os.path.join(TMP, "dest.db")
+noticias.inicializar(dd)
+cd = connect(dd)
+ah = int(time.time())
+def mete(clave, titulo, hace_h, imp=0, act="", fid="france24_es", cat="geopolitica"):
+    cd.execute("INSERT INTO noticias (clave,titulo_norm,fuente_id,fuente,idioma,categoria,titulo,enlace,publicado,recibido,impacto,activos) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+               (clave, clave, fid, "France 24", "es", cat, titulo, "https://x/" + clave, ah - int(hace_h * 3600), ah - int(hace_h * 3600), imp, act))
+mete("cumbre", cum, 32, 0, "EUR")                                  # guardada con las reglas viejas: impacto 0
+mete("vieja", "Cumbre entre Trump y Putin hace tres dias", 72, 0, "")
+for i in range(90):
+    mete(f"r{i}", f"Titular corriente numero {i}", i / 20, 0, "")
+mete("futbol", "Pese a goleada, Alemania sale del Top 10 de selecciones de futbol", 2, 0, "EUR")
+cd.commit()
+d0 = noticias.consultar("es", n=80, ruta=dd)
+chk("42. Antes de reiniciar el servicio (reglas viejas guardadas): la cumbre no esta en la lista", not any(x["original"] == cum for x in d0["noticias"]) and d0["destacadas"] == [])
+noticias.inicializar(dd)    # el servicio al arrancar reclasifica lo guardado
+fila_c = cd.execute("SELECT impacto, activos FROM noticias WHERE clave='cumbre'").fetchone()
+fila_f = cd.execute("SELECT activos FROM noticias WHERE clave='futbol'").fetchone()
+chk("43. Al arrancar se reclasifica lo guardado: cumbre ALTO con oro, dolar y euro; el futbol pierde EUR", fila_c == (2, "XAU,USD,EUR") and fila_f[0] == "", (fila_c, fila_f))
+d1 = noticias.consultar("es", n=80, ruta=dd)
+chk("44. 'Todas' con 80 titulares: la cumbre de hace 32 h sale en 'destacadas' (la de hace 72 h no; sin repetir lo de la lista)",
+    [x["original"] for x in d1["destacadas"]] == [cum] and not any(x["original"] == cum for x in d1["noticias"]), [x["original"] for x in d1["destacadas"]])
+de = noticias.consultar("es", activo="EUR", n=80, ruta=dd)
+orig_eur = [x["original"] for x in de["noticias"]]
+chk("45. Filtro EUR: las cumbres con Putin si, el futbol de Alemania y los titulares corrientes no",
+    cum in orig_eur and not any("futbol" in x or "corriente" in x for x in orig_eur), orig_eur)
+chk("46. Con 'desde' (aviso de nuevos) no se mandan destacadas", noticias.consultar("es", desde_id=1, ruta=dd)["destacadas"] == [])
+import importlib.util
+_esp = importlib.util.spec_from_file_location("noticias_original", noticias.__file__); _orig = importlib.util.module_from_spec(_esp); _esp.loader.exec_module(_orig)
+chk("47. Fuente GDELT del euro en la lista real de fuentes, y lo que trae queda como EUR",
+    any(f[0] == "gdelt_eur" and "gdeltproject.org" in f[2] for f in _orig.FUENTES) and "EUR" in cl("Stocks rally in Asia", "mercados", "gdelt_eur")[1])
+noticias.FUENTES = [("gdelt", "Radar GDELT", "https://api.gdeltproject.org/a", "en", "radar", 60),
+                    ("gdelt_eur", "Radar GDELT euro", "https://api.gdeltproject.org/b", "en", "mercados", 60)]
+marcas = []
+def get_gd(url, headers=None, timeout=None):
+    marcas.append(time.time()); return R(b"{}")
+noticias._ultimo_gdelt[0] = 0
+noticias.una_vuelta(get=get_gd, ruta=os.path.join(TMP, "gd.db"), forzar=True)
+chk("48. Dos consultas GDELT seguidas: la segunda espera 5 s o mas (GDELT lo exige)", len(marcas) == 2 and marcas[1] - marcas[0] >= 5, [round(m - marcas[0], 2) for m in marcas])
 print("\nTODO OK" if ok else "\nHAY FALLAS"); sys.exit(0 if ok else 1)

@@ -81,6 +81,9 @@ FUENTES = [
     # Radar global (GDELT: monitoreo abierto de noticias del mundo; solo dominios de confianza)
     ("gdelt", "Radar GDELT", "https://api.gdeltproject.org/api/v2/doc/doc?query=(war%20OR%20missile%20OR%20sanctions%20OR%20invasion%20OR%20ceasefire%20OR%20coup%20OR%20nuclear%20OR%20OPEC%20OR%20tariffs)%20sourcelang:english&mode=artlist&format=json&maxrecords=75&timespan=60min&sort=datedesc",
      "en", "radar", 300),
+    # Radar del euro (GDELT): BCE, eurozona y economia europea, solo de los medios de DOMINIOS_RADAR
+    ("gdelt_eur", "Radar GDELT euro", "https://api.gdeltproject.org/api/v2/doc/doc?query=(ECB%20OR%20Lagarde%20OR%20eurozone%20OR%20%22euro%20area%22%20OR%20%22European%20Central%20Bank%22%20OR%20Bundesbank)%20sourcelang:english&mode=artlist&format=json&maxrecords=50&timespan=180min&sort=datedesc",
+     "en", "mercados", 600),
 ]
 # Solo para el radar GDELT: medios reconocidos (GDELT trae de todo, incluidos sitios de baja calidad)
 DOMINIOS_RADAR = {
@@ -124,11 +127,36 @@ _ACTIVOS = {
             "payrolls", "cpi", "jobs report", "nonfarm", "white house", "casa blanca", "tariff*", "arancel*"],
     "OIL": ["oil", "crude", "brent", "wti", "opec*", "petroleo", "hormuz", "red sea", "houthi*", "saudi*", "iran*",
             "refiner*", "pipeline*", "lng"],
-    "EUR": ["ecb", "lagarde", "eurozone", "euro area", "bce", "eurozona", "germany", "alemania", "euro"],
+    # EUR: el euro, el BCE y la economia de la eurozona. "Alemania" sola traia futbol y sociedad: fuera.
+    "EUR": ["ecb", "european central bank", "banco central europeo", "lagarde", "schnabel", "philip lane", "nagel", "bundesbank",
+            "eurozone", "euro zone", "euro area", "bce", "eurozona", "zona euro", "euro", "euros", "eurusd", "eur usd",
+            "european union", "union europea", "european commission", "comision europea", "von der leyen", "brussels",
+            "bruselas", "eu tariff*", "eu trade", "german economy", "economia alemana", "german gdp", "german inflation",
+            "german industr*", "ifo", "zew", "bund yield*", "bunds", "french budget", "french debt", "deuda francesa",
+            "coalition of the willing", "coalicion de voluntarios"],
     "GBP": ["boe", "bank of england", "bailey", "sterling", "libra esterlina"],
     "JPY": ["boj", "bank of japan", "ueda", "yen", "japan*"],
     "BTC": ["bitcoin", "btc", "crypto*", "cripto*", "binance", "coinbase", "stablecoin*", "ethereum", "ether"],
 }
+
+# Cumbres y reuniones de los lideres que mueven el mercado mundial: siempre ALTO y "destacadas" (caso real: la cumbre
+# Trump, Xi y Putin de noviembre de 2026 quedo como impacto 0 y nunca aparecio en "Alto impacto").
+_GRANDES = {"trump": ["trump"], "xi": ["xi", "xi jinping"], "putin": ["putin"], "zelensky": ["zelensk*", "zelenski*"]}
+_CUMBRE = ["summit*", "cumbre*", "meets", "meeting with", "met with", "se reune*", "se reunio", "se reuniran", "reunion con",
+           "reunion entre", "encuentro con", "encuentro entre", "talks with", "conversaciones con", "call with",
+           "phone call", "llamada con", "llamada telefonica", "state visit", "visita de estado", "visits beijing",
+           "visits moscow", "visits washington", "visits kyiv", "visita moscu", "visita pekin", "visita washington", "visita kiev"]
+_FOROS = ["g7", "g20", "nato", "otan", "brics", "apec", "opec"]
+_SUMMIT = ["summit*", "cumbre*"]
+_EUROPA = ["putin", "zelensk*", "zelenski*", "ukrain*", "ucrania*", "nato", "otan", "europ*", "russia*", "rusia*"]
+# Destacadas: lo que conviene ver aunque haya pasado un dia (se muestran arriba hasta 48 h)
+_DESTACADA = ["declares war", "declara la guerra", "invasion", "invad*", "nuclear strike", "nuclear test", "ensayo nuclear",
+              "coup", "coups", "golpe de estado", "martial law", "ley marcial", "rate decision", "decision de tasas",
+              "raises rates", "raises interest rates", "cuts rates", "cuts interest rates", "holds rates",
+              "leaves rates unchanged", "keeps rates unchanged", "sube las tasas", "baja las tasas", "mantiene las tasas",
+              "emergency meeting", "reunion de emergencia", "hormuz", "ceasefire", "alto el fuego", "truce"]
+DESTACADAS_H = 48
+DESTACADAS_N = 5
 
 _lock_db = threading.Lock()
 
@@ -185,8 +213,8 @@ def inicializar(ruta: str = None) -> None:
         # Reclasificar lo guardado con las reglas actuales (unos miles de titulares: milisegundos).
         # Asi un cambio de palabras clave vale tambien para lo que ya estaba en la base.
         cambios = []
-        for nid, titulo, cat, imp, act, pol in c.execute("SELECT id, titulo, categoria, impacto, activos, politica FROM noticias"):
-            i2, a2 = clasificar(titulo, cat)
+        for nid, titulo, cat, imp, act, pol, fid in c.execute("SELECT id, titulo, categoria, impacto, activos, politica, fuente_id FROM noticias"):
+            i2, a2 = clasificar(titulo, cat, fid)
             p2 = es_politica(titulo, cat)
             if (i2, a2, p2) != (imp, act, pol):
                 cambios.append((i2, a2, p2, nid))
@@ -290,13 +318,39 @@ _RE_POLITICA = _patron(_POLITICA)
 def es_politica(titulo: str, categoria: str) -> int:
     return 1 if categoria == "oficial" or _RE_POLITICA.search(normalizar(titulo)) else 0
 _RE_ACTIVOS = {a: _patron(p) for a, p in _ACTIVOS.items()}
+_RE_GRANDES = {k: _patron(v) for k, v in _GRANDES.items()}
+_RE_CUMBRE, _RE_FOROS, _RE_SUMMIT = _patron(_CUMBRE), _patron(_FOROS), _patron(_SUMMIT)
+_RE_EUROPA, _RE_DESTACADA = _patron(_EUROPA), _patron(_DESTACADA)
 
 
-def clasificar(titulo: str, categoria: str):
+def es_cumbre(titulo: str) -> bool:
+    """Cumbre o reunion de grandes lideres: dos de ellos en el titular, uno con palabra de reunion, o un foro (G7, G20,
+    OTAN...) en cumbre."""
+    t = normalizar(titulo)
+    grandes = sum(1 for rx in _RE_GRANDES.values() if rx.search(t))
+    return grandes >= 2 or (grandes == 1 and bool(_RE_CUMBRE.search(t))) or bool(_RE_FOROS.search(t) and _RE_SUMMIT.search(t))
+
+
+def es_destacada(titulo: str) -> bool:
+    return es_cumbre(titulo) or bool(_RE_DESTACADA.search(normalizar(titulo)))
+
+
+# Lo que publica un banco central es de su moneda aunque el titular no la nombre ("Philip R. Lane: ...")
+_FUENTE_ACTIVO = {"ecb": "EUR", "fed": "USD", "fed_discursos": "USD", "boe": "GBP", "gdelt_eur": "EUR"}
+
+
+def clasificar(titulo: str, categoria: str, fuente_id: str = ""):
     """(impacto 0/1/2, activos 'XAU,OIL'). Reglas simples y transparentes, sin IA."""
     t = normalizar(titulo)
-    impacto = 2 if _RE_ALTO.search(t) else 1 if (_RE_MEDIO.search(t) or categoria in ("bancos", "oficial")) else 0
+    cumbre = es_cumbre(titulo)
+    impacto = 2 if (cumbre or _RE_ALTO.search(t) or _RE_DESTACADA.search(t)) else 1 if (_RE_MEDIO.search(t) or categoria in ("bancos", "oficial")) else 0
     activos = [a for a, rx in _RE_ACTIVOS.items() if rx.search(t)]
+    if cumbre:   # una cumbre de grandes lideres mueve el oro y el dolar; si toca a Europa, tambien el euro
+        extra = {"XAU", "USD"} | ({"EUR"} if _RE_EUROPA.search(t) else set())
+        activos = [a for a in _ACTIVOS if a in extra or a in activos]
+    propio = _FUENTE_ACTIVO.get(fuente_id)
+    if propio and propio not in activos:
+        activos = [a for a in _ACTIVOS if a == propio or a in activos]
     return impacto, ",".join(activos)
 
 
@@ -395,7 +449,7 @@ def leer_fuente(fuente, get=requests.get, etag: str = None, modificado: str = No
         fecha = x["fecha"] if 0 < x["fecha"] <= ahora + 300 else ahora
         if ahora - fecha > MAX_EDAD_ENTRADA_H * 3600:
             continue
-        nombre_fuente = nombre if fid != "gdelt" else (x.get("fuente") or nombre)
+        nombre_fuente = nombre if not fid.startswith("gdelt") else (x.get("fuente") or nombre)
         items.append({"fuente_id": fid, "fuente": nombre_fuente, "idioma": idioma, "categoria": categoria,
                       "titulo": titulo, "enlace": enlace, "publicado": min(fecha, ahora)})
     h = getattr(r, "headers", {}) or {}
@@ -415,7 +469,7 @@ def guardar(items: list, ruta: str = None) -> int:
             if c.execute("SELECT 1 FROM noticias WHERE clave=? OR (titulo_norm=? AND recibido>?)",
                          (clave, norm, ahora - 86400)).fetchone():
                 continue
-            impacto, activos = clasificar(it["titulo"], it["categoria"])
+            impacto, activos = clasificar(it["titulo"], it["categoria"], it["fuente_id"])
             politica = es_politica(it["titulo"], it["categoria"])
             t = {"es": None, "en": None, "pt": None}
             if it["idioma"] in t:
@@ -433,6 +487,9 @@ def _estado_fuente(c, fid):
     return dict(r) if r else {"fuente_id": fid, "ultimo_intento": 0, "ultimo_ok": 0, "fallos": 0, "etag": None, "modificado": None}
 
 
+_ultimo_gdelt = [0.0]
+
+
 def una_vuelta(get=requests.get, ruta: str = None, forzar: bool = False) -> dict:
     """Lee las fuentes a las que les toca (segun cada_seg y espera por fallos) y guarda lo nuevo."""
     inicializar(ruta)
@@ -446,6 +503,11 @@ def una_vuelta(get=requests.get, ruta: str = None, forzar: bool = False) -> dict
         if not forzar and ahora - (est["ultimo_intento"] or 0) < espera:
             continue
         resumen["leidas"] += 1
+        if "gdeltproject.org" in fuente[2]:   # GDELT: una consulta cada 5 s como maximo
+            falta = 6 - (time.time() - _ultimo_gdelt[0])
+            if falta > 0:
+                time.sleep(falta)
+            _ultimo_gdelt[0] = time.time()
         try:
             items, etag, mod, codigo = leer_fuente(fuente, get=get, etag=est.get("etag"), modificado=est.get("modificado"))
             n = guardar(items, ruta)
@@ -489,6 +551,7 @@ def consultar(idioma: str = "es", categoria: str = "", solo_alto: bool = False, 
     if activo and re.fullmatch(r"[A-Z]{3}", activo):
         sql += " AND (',' || activos || ',') LIKE ?"
         args.append(f"%,{activo},%")
+    sql_dest, args_dest = sql + " AND impacto = 2 AND publicado > ? ORDER BY publicado DESC, id DESC LIMIT 300", args + [int(time.time()) - DESTACADAS_H * 3600]
     sql += " ORDER BY publicado DESC, id DESC LIMIT ?"
     args.append(n)
     try:
@@ -497,21 +560,26 @@ def consultar(idioma: str = "es", categoria: str = "", solo_alto: bool = False, 
                 # Mientras el servicio de noticias no haya migrado la base (columna nueva), solo las oficiales
                 tiene = "politica" in [r[1] for r in c.execute("PRAGMA table_info(noticias)")]
                 sql = sql.replace("WHERE id > ?", "WHERE id > ? AND " + ("(categoria = 'oficial' OR politica = 1)" if tiene else "categoria = 'oficial'"))
+                sql_dest = sql_dest.replace("WHERE id > ?", "WHERE id > ? AND " + ("(categoria = 'oficial' OR politica = 1)" if tiene else "categoria = 'oficial'"))
             filas = c.execute(sql, args).fetchall()
+            # Destacadas (cumbres de grandes lideres, decisiones de tasas, guerra...) de las ultimas 48 h que ya
+            # salieron de la lista: asi un evento grande de ayer no se pierde debajo de los titulares de la ultima hora.
+            vistos = {f["id"] for f in filas}
+            dest = [] if desde_id else [f for f in c.execute(sql_dest, args_dest).fetchall()
+                                        if f["id"] not in vistos and es_destacada(f["titulo"])][:DESTACADAS_N]
             ultimo = c.execute("SELECT MAX(id), MAX(recibido) FROM noticias").fetchone()
     except sqlite3.OperationalError:     # base aun no creada: el servicio de noticias no ha corrido
-        return {"noticias": [], "ultimo_id": 0, "actualizado": None, "idioma": idioma}
-    salida = []
-    for f in filas:
+        return {"noticias": [], "destacadas": [], "ultimo_id": 0, "actualizado": None, "idioma": idioma}
+    def fila(f):
         traducido = f["t_" + idioma]
-        salida.append({
+        return {
             "id": f["id"], "fuente": f["fuente"], "categoria": f["categoria"],
             "titulo": traducido or f["titulo"], "original": f["titulo"], "idioma_original": f["idioma"],
             "traducido": bool(traducido) and f["idioma"] != idioma, "enlace": f["enlace"],
             "publicado": datetime.fromtimestamp(f["publicado"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "impacto": f["impacto"], "activos": [a for a in (f["activos"] or "").split(",") if a],
-        })
-    return {"noticias": salida, "ultimo_id": ultimo[0] or 0, "idioma": idioma,
+        }
+    return {"noticias": [fila(f) for f in filas], "destacadas": [fila(f) for f in dest], "ultimo_id": ultimo[0] or 0, "idioma": idioma,
             "actualizado": datetime.fromtimestamp(ultimo[1], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if ultimo[1] else None}
 
 
