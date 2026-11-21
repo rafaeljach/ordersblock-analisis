@@ -14,6 +14,7 @@ Endpoints (todos GET, respuesta JSON):
   /noticias/estado                        salud del servicio de noticias (público)
   /tasa/COP                               tasa USDT->COP (Binance P2P) para pagos con tarjeta (clave)
   /velas/{mercado}?tf=60&n=200            velas OHLC para la vista Mercado (público, caché 60 s)
+  /velas/XMRUSD?tf=60&n=200               perpetuo USDT de XMR: Binance USDT-M y, si no responde, Bybit (perpetuos.py)
   /velas/DXY?tf=60                         índice del dólar para el panel del oro (Yahoo o calculado con Kraken)
 
 Seguridad: toda ruta salvo /salud, /precios, /velas y /noticias exige la cabecera
@@ -47,6 +48,7 @@ import dxy
 import escaner
 import memoria
 import noticias
+import perpetuos
 import precios
 import tasa_cop
 import predicciones
@@ -310,7 +312,9 @@ async def velas_ruta(request: Request):
     # Solo mercados que el motor conoce: un simbolo inventado podia gastar la cuota de Twelve Data.
     # Las cripto con sufijo USD (SOLUSD, XRPUSD...) se piden por su simbolo base, que va por Bybit (gratis);
     # antes caian en Twelve Data y gastaban cuota.
-    if mercado not in ("DXY", "USDX") and not servicio.engine.plan_requerido(crudo):
+    # Perpetuos que el motor no tiene (XMR): Binance USDT-M y, si no responde, Bybit. No pasan por el motor.
+    perp = perpetuos.base_de(crudo)
+    if mercado not in ("DXY", "USDX") and not perp and not servicio.engine.plan_requerido(crudo):
         base = mercado[:-3] if mercado.endswith("USD") else ""
         if base and base in servicio.engine.CRIPTO_AMPLIADO:
             mercado = base
@@ -337,6 +341,16 @@ async def velas_ruta(request: Request):
     hit = _cache_velas.get(clave)
     if hit and ahora - hit[0] < 60:
         return JSONResponse({"ok": True, "datos": hit[1]}, headers={"Cache-Control": "public, max-age=30"})
+    if perp:
+        try:
+            async with _semaforo:
+                salida = await asyncio.to_thread(perpetuos.velas, perp, tf, n)
+        except Exception as e:
+            if hit:
+                return JSONResponse({"ok": True, "datos": hit[1]}, headers={"Cache-Control": "public, max-age=30"})
+            return _error(503, f"{perp}: sin velas del perpetuo ({str(e)[:200]})")
+        _cache_velas[clave] = (ahora, salida)
+        return JSONResponse({"ok": True, "datos": salida}, headers={"Cache-Control": "public, max-age=30"})
     try:
         async with _semaforo:
             datos = await asyncio.to_thread(servicio.engine.obtener_datos_mercado, mercado,
