@@ -114,7 +114,7 @@ def es_oportunidad(r: dict) -> bool:
         return False
     if r.get("direccion") not in ("ALCISTA", "BAJISTA"):
         return False
-    esp, cons = r.get("esperanza_r"), r.get("consenso_pct")
+    esp, cons = _num(r.get("esperanza_r")), _num(r.get("consenso_pct"))   # mismos umbrales; un texto ya no revienta
     if esp is None or cons is None:
         return False
     if r.get("entrada") is None or r.get("sl") is None or r.get("tp1") is None:
@@ -172,21 +172,21 @@ def candidato_sombra(r: dict):
     if motivo_descarte(r) != "candidato":
         return None
     z = r.get("zona") or {}
-    base = {"mercado": r["mercado"], "direccion": r["direccion"], "consenso_pct": r.get("consenso_pct"),
+    base = {"mercado": r["mercado"], "direccion": r["direccion"], "consenso_pct": _num(r.get("consenso_pct")),
             "smc_score": r.get("smc_score"), "precio": r.get("precio"), "sombra": True,
             "actualizado": r.get("actualizado")}
     if z.get("disponible") and _plan_sombra_valido(z, r["direccion"], r.get("precio"), zona=True):
-        return {**base, "tipo_plan": "zona", "entrada": z["entrada"], "sl": z["sl"], "tp1": z["tp1"],
-                "rr": z.get("rr"), "esperanza_r": z.get("esperanza_r"), "prob_tp_pct": z.get("prob_tp_pct"),
+        return {**base, "tipo_plan": "zona", "entrada": _num(z["entrada"]), "sl": _num(z["sl"]), "tp1": _num(z["tp1"]),
+                "rr": _num(z.get("rr")), "esperanza_r": _num(z.get("esperanza_r")), "prob_tp_pct": _num(z.get("prob_tp_pct")),
                 "origen_zona": z.get("origen_zona")}
-    return {**base, "tipo_plan": "mercado", "entrada": r["entrada"], "sl": r["sl"], "tp1": r["tp1"],
-            "rr": r.get("rr"), "esperanza_r": r.get("esperanza_r"), "prob_tp_pct": r.get("prob_tp_pct")}
+    return {**base, "tipo_plan": "mercado", "entrada": _num(r["entrada"]), "sl": _num(r["sl"]), "tp1": _num(r["tp1"]),
+            "rr": _num(r.get("rr")), "esperanza_r": _num(r.get("esperanza_r")), "prob_tp_pct": _num(r.get("prob_tp_pct"))}
 
 
 def puntuacion(r: dict) -> float:
     """Ordena: esperanza ponderada por consenso; desempata por probabilidad de TP."""
-    return (r.get("esperanza_r") or 0) * ((r.get("consenso_pct") or 0) / 100.0) \
-        + 0.001 * (r.get("prob_tp_pct") or 0)
+    return (_num(r.get("esperanza_r")) or 0) * ((_num(r.get("consenso_pct")) or 0) / 100.0) \
+        + 0.001 * (_num(r.get("prob_tp_pct")) or 0)
 
 
 def analizar_uno(mercado: str) -> dict:

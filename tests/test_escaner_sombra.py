@@ -162,6 +162,20 @@ def main():
     dg = escaner.diagnostico({"A": "fila rota", "B": {**base, "consenso_pct": "70"}, "C": {**base, "consenso_pct": object()}})
     chk(dg.get("estado invalido") == 1 and dg.get("consenso bajo") == 1 and sum(dg.values()) == 3,
         "estado guardado raro: una fila rota se cuenta como estado invalido, el texto no rompe nada y la ruta no cae " + json.dumps(dg))
+    with escaner._lock:
+        guardado = dict(escaner._estado["mercados"])
+        escaner._estado["mercados"] = {"T": {**base, "esperanza_r": "0.2", "zona": {**base["zona"], "esperanza_r": "0.04", "rr": "2.0"}}, "U": base}
+    try:
+        rs = escaner.oportunidades(None, 20, sombra=True)
+        chk(all(isinstance(c["esperanza_r"], float) and isinstance(c["rr"], float) for c in rs["oportunidades"]) and len(rs["oportunidades"]) == 2,
+            "numeros guardados como texto: el candidato sale con numeros y el orden no revienta")
+        escaner._estado["mercados"]["V"] = {"mercado": "V", "direccion": "ALCISTA", "consenso_pct": "70", "esperanza_r": "0.3",
+                                            "entrada": 1, "sl": 0.9, "tp1": 1.2, "prob_tp_pct": "60"}
+        rc = escaner.oportunidades(None, 20)
+        chk([o["mercado"] for o in rc["oportunidades"]] == ["V"], "la ruta del cliente tampoco revienta con texto y aplica la misma puerta")
+    finally:
+        with escaner._lock:
+            escaner._estado["mercados"] = guardado
     viejo = {"mercado": "X", "direccion": "ALCISTA", "consenso_pct": 70, "esperanza_r": 0.3,
              "entrada": 1, "sl": 0.9, "tp1": 1.2, "prob_tp_pct": 60}
     chk(escaner.es_oportunidad(viejo) and not escaner.es_oportunidad({**viejo, "consenso_pct": 50}),
