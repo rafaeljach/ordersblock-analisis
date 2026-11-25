@@ -237,7 +237,11 @@ def analizar_escaner(mercado: str) -> dict:
     if mercado not in engine.MERCADO_A_SYMBOL:
         raise ErrorServicio(404, f"Mercado '{mercado}' no disponible.")
     a, base = _calcular(mercado, False)
-    prec, _ = _plan_precision(a, mercado)
+    try:
+        prec, _ = _plan_precision(a, mercado)
+    except Exception as e:  # noqa: BLE001 — un fallo de la zona no debe tumbar el plan a mercado
+        prec = {"tipo": "precision", "disponible": False,
+                "motivo": f"No se pudo calcular la entrada en zona: {type(e).__name__}"}
     return _limpio({**base, "plan": _plan_mercado(a), "plan_precision": prec})
 
 
