@@ -160,6 +160,32 @@ def analizar(mercado: str, tipo: str = "mercado", con_fundamental: bool = True,
     if tipo not in ("mercado", "precision"):
         raise ErrorServicio(400, "tipo debe ser 'mercado' o 'precision'.")
 
+    a, base = _calcular(mercado, con_fundamental)
+
+    if tipo == "mercado":
+        plan = _plan_mercado(a)
+        if registrar:
+            plan["id_seguimiento"] = memoria.registrar_senal(
+                mercado, a.direccion_predicha, a.entrada_mercado, a.sl, a.tp1, "mercado",
+                a.fundamental_etiqueta if con_fundamental else None, usuario)
+        return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+
+    plan, pp = _plan_precision(a, mercado)
+    if not plan.get("disponible"):
+        plan.pop("esperanza_r", None)   # el cliente recibe exactamente lo mismo que antes
+    # Una orden pendiente se registra igual que el bot: el horizonte cuenta
+    # desde ahora. Si nunca se activa, la verificación lo reflejará como
+    # NINGUNO en tipo_toque (no hubo operación).
+    if registrar and plan.get("disponible"):
+        plan["id_seguimiento"] = memoria.registrar_senal(
+            mercado, a.direccion_predicha, pp["entrada"], pp["sl"],
+            pp["escalera"][0]["precio"] if pp["escalera"] else None, "precision",
+            a.fundamental_etiqueta if con_fundamental else None, usuario)
+    return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+
+
+def _calcular(mercado: str, con_fundamental: bool):
+    """Corre el motor una vez y arma la parte común del análisis (sin plan)."""
     st_alc = memoria.estadisticas_direccion(mercado, "ALCISTA")
     st_baj = memoria.estadisticas_direccion(mercado, "BAJISTA")
     st_glb = memoria.estadisticas_mercado(mercado)
@@ -199,36 +225,53 @@ def analizar(mercado: str, tipo: str = "mercado", con_fundamental: bool = True,
                     "acierto_mercado_pct": st_glb["tasa_acierto"]},
         "aviso_legal": "Análisis probabilístico. No es asesoría financiera.",
     }
+    return a, base
 
-    if tipo == "mercado":
-        plan = {
-            "tipo": "mercado",
-            "entrada": a.entrada_mercado,
-            "sl": a.sl,
-            "objetivos": a.escalera_tp or [{"etiqueta": "TP1", "precio": a.tp1, "rr": a.rr_ratio}],
-            "rr": a.rr_ratio,
-            "prob_tp_antes_que_sl_pct": a.prob_tp_primero,
-            "esperanza_r": a.esperanza_r,
-            "aviso_esperanza": ("Esperanza negativa: repetida muchas veces pierde en promedio."
-                                if (a.esperanza_r or 0) < 0 else None),
-            "aseguramiento": ({"precio": a.aseguramiento_precio, "r": a.aseguramiento_r,
-                               "porcentaje": a.aseguramiento_pct,
-                               "instruccion": "Asegura parcial ahí y mueve el stop a la entrada."}
-                              if a.aseguramiento_precio else None),
-            "coste_ida_vuelta_pct": a.coste_pct,
-        }
-        if registrar:
-            plan["id_seguimiento"] = memoria.registrar_senal(
-                mercado, a.direccion_predicha, a.entrada_mercado, a.sl, a.tp1, "mercado",
-                a.fundamental_etiqueta if con_fundamental else None, usuario)
-        return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
 
-    # --- PRECISIÓN: misma lógica que el flujo de precisión del bot ---
+def analizar_escaner(mercado: str) -> dict:
+    """
+    Para el escáner: UNA pasada del motor y los DOS planes (a mercado y en
+    zona). No registra nada en la memoria ni usa el fundamental (cuota).
+    """
+    mercado = engine.normalizar_mercado(mercado)
+    if mercado not in engine.MERCADO_A_SYMBOL:
+        raise ErrorServicio(404, f"Mercado '{mercado}' no disponible.")
+    a, base = _calcular(mercado, False)
+    try:
+        prec, _ = _plan_precision(a, mercado)
+    except Exception as e:  # noqa: BLE001 — un fallo de la zona no debe tumbar el plan a mercado
+        prec = {"tipo": "precision", "disponible": False,
+                "motivo": f"No se pudo calcular la entrada en zona: {type(e).__name__}"}
+    return _limpio({**base, "plan": _plan_mercado(a), "plan_precision": prec})
+
+
+def _plan_mercado(a) -> dict:
+    """Plan con entrada al precio actual (la misma que entrega el bot)."""
+    return {
+        "tipo": "mercado",
+        "entrada": a.entrada_mercado,
+        "sl": a.sl,
+        "objetivos": a.escalera_tp or [{"etiqueta": "TP1", "precio": a.tp1, "rr": a.rr_ratio}],
+        "rr": a.rr_ratio,
+        "prob_tp_antes_que_sl_pct": a.prob_tp_primero,
+        "esperanza_r": a.esperanza_r,
+        "aviso_esperanza": ("Esperanza negativa: repetida muchas veces pierde en promedio."
+                            if (a.esperanza_r or 0) < 0 else None),
+        "aseguramiento": ({"precio": a.aseguramiento_precio, "r": a.aseguramiento_r,
+                           "porcentaje": a.aseguramiento_pct,
+                           "instruccion": "Asegura parcial ahí y mueve el stop a la entrada."}
+                          if a.aseguramiento_precio else None),
+        "coste_ida_vuelta_pct": a.coste_pct,
+    }
+
+
+def _plan_precision(a, mercado: str):
+    """Plan con orden límite en zona de valor (misma lógica que el bot).
+    Devuelve (plan, pp); pp es None cuando no hay entrada de precisión."""
     sesion = a.sesion or {}
     if sesion.get("liquidez") == "CERRADO":
-        plan = {"tipo": "precision", "disponible": False,
-                "motivo": sesion.get("nota") or "Mercado cerrado: no se deja orden pendiente."}
-        return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+        return {"tipo": "precision", "disponible": False,
+                "motivo": sesion.get("nota") or "Mercado cerrado: no se deja orden pendiente."}, None
 
     atr = max(a.precio_actual * a.volatilidad_por_vela * (24 ** 0.5), a.precio_actual * 1e-5)
     ent = engine.construir_entrada_precision(
@@ -238,10 +281,9 @@ def analizar(mercado: str, tipo: str = "mercado", con_fundamental: bool = True,
         {"gap_min": getattr(a, "fvg_gap_min", None), "gap_max": getattr(a, "fvg_gap_max", None)},
         a.mirrofish_nivel_espejo, atr, mercado)
     if not ent.get("viable"):
-        plan = {"tipo": "precision", "disponible": False,
+        return {"tipo": "precision", "disponible": False,
                 "motivo": "El precio no está cerca de ninguna zona de valor donde merezca "
-                          "la pena dejar una orden esperando."}
-        return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+                          "la pena dejar una orden esperando."}, None
 
     alcista = a.direccion_predicha == "ALCISTA"
     pp = engine.plan_desde_entrada_precision(
@@ -253,12 +295,12 @@ def analizar(mercado: str, tipo: str = "mercado", con_fundamental: bool = True,
         a.direccion_predicha, a.volatilidad_por_vela, a.drift_por_vela, mercado,
         seed=getattr(a, "seed_analisis", None))
     if esp.get("valida") and esp["esperanza_r"] <= 0:
-        plan = {"tipo": "precision", "disponible": False,
+        return {"tipo": "precision", "disponible": False,
                 "motivo": (f"Hay zona en {fmt_precio(pp['entrada'])} ({ent['origen']}), pero "
                            f"incluso entrando ahí la esperanza sale {esp['esperanza_r']:+.3f}R "
                            f"({esp['p_tp']}% TP vs {esp['p_sl']}% SL). Esperar no arregla "
-                           f"una señal débil.")}
-        return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+                           f"una señal débil."),
+                "esperanza_r": esp["esperanza_r"]}, None
 
     seg = engine.nivel_aseguramiento(pp["entrada"], pp["sl"], a.direccion_predicha)
     plan = {
@@ -274,15 +316,7 @@ def analizar(mercado: str, tipo: str = "mercado", con_fundamental: bool = True,
         "caduca_horas": 24,
         "aviso": "El precio puede no volver a esa zona: ese es el coste de no perseguir el mercado.",
     }
-    # Una orden pendiente se registra igual que el bot: el horizonte cuenta
-    # desde ahora. Si nunca se activa, la verificación lo reflejará como
-    # NINGUNO en tipo_toque (no hubo operación).
-    if registrar:
-        plan["id_seguimiento"] = memoria.registrar_senal(
-            mercado, a.direccion_predicha, pp["entrada"], pp["sl"],
-            pp["escalera"][0]["precio"] if pp["escalera"] else None, "precision",
-            a.fundamental_etiqueta if con_fundamental else None, usuario)
-    return _limpio({**base, "plan": plan, "texto": texto_analisis(base, plan)})
+    return plan, pp
 
 
 def texto_analisis(base: dict, plan: dict) -> str:

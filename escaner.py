@@ -9,11 +9,21 @@ Reglas:
   que comparte el droplet.
 - No registra señales en la memoria (registrar=False): solo el análisis que el
   cliente pide de verdad entra al ciclo de verificación.
+- Una pasada del motor por mercado y DOS planes: a mercado y en zona (OB, FVG,
+  zona cero, Mirrofish). Antes solo miraba la entrada a mercado, cuya esperanza
+  por Monte Carlo sale casi siempre ~0 menos la comisión: en la práctica el
+  escáner no encontraba nunca nada (0 planes en sombra en toda su historia).
+- Dos puertas distintas:
+    · oportunidad (lo que ve el cliente): la de siempre, sin cambios.
+    · candidato en sombra (?sombra=1): filtro estructural más amplio, solo para
+      registrarlo y verificarlo con precio real. Los números deciden después.
+- Diagnóstico: cada mercado queda con el motivo por el que se descartó.
 - Nunca lanza: un mercado que falla se anota con su error y se sigue.
 """
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -34,6 +44,10 @@ ARCHIVO = os.getenv("ORDERSBLOCK_ESCANER_ARCHIVO",
 # Umbrales de "oportunidad": esperanza positiva y consenso suficiente.
 ESPERANZA_MIN = float(os.getenv("ORDERSBLOCK_ESCANER_ESPERANZA_MIN", "0.05"))
 CONSENSO_MIN = float(os.getenv("ORDERSBLOCK_ESCANER_CONSENSO_MIN", "55"))
+# Candidatos en sombra: 2 de 4 componentes del consenso, R:R mínimo del sistema y
+# esperanza positiva después de la comisión. No se muestran al cliente.
+SOMBRA_CONSENSO_MIN = float(os.getenv("ORDERSBLOCK_ESCANER_SOMBRA_CONSENSO_MIN", "50"))
+SOMBRA_RR_MIN = float(os.getenv("ORDERSBLOCK_ESCANER_SOMBRA_RR_MIN", "1.3"))
 
 _lock = threading.Lock()
 _estado: dict = {"actualizado": None, "ciclo_seg": None, "mercados": {}}
@@ -57,6 +71,18 @@ def universo() -> list:
     return out
 
 
+def _resumir_zona(p: dict) -> dict:
+    p = p or {}
+    if not p.get("disponible"):
+        return {"disponible": False, "motivo": (p.get("motivo") or "")[:160],
+                "esperanza_r": p.get("esperanza_r")}
+    objs = p.get("objetivos") or []
+    return {"disponible": True, "entrada": p.get("entrada"), "sl": p.get("sl"),
+            "tp1": objs[0].get("precio") if objs else None, "rr": p.get("rr"),
+            "esperanza_r": p.get("esperanza_r"), "prob_tp_pct": p.get("prob_tp_pct"),
+            "origen_zona": p.get("origen_zona"), "distancia_pct": p.get("distancia_pct")}
+
+
 def _resumir(mercado: str, d: dict) -> dict:
     plan = d.get("plan") or {}
     objs = plan.get("objetivos") or []
@@ -76,6 +102,8 @@ def _resumir(mercado: str, d: dict) -> dict:
         "volatilidad": d.get("volatilidad"),
         "smc_score": (d.get("smc") or {}).get("score"),
         "sesion": (d.get("sesion") or {}).get("nombre") if isinstance(d.get("sesion"), dict) else d.get("sesion"),
+        "liquidez": (d.get("sesion") or {}).get("liquidez") if isinstance(d.get("sesion"), dict) else None,
+        "zona": _resumir_zona(d.get("plan_precision")),
         "actualizado": time.time(),
         "error": None,
     }
@@ -86,7 +114,7 @@ def es_oportunidad(r: dict) -> bool:
         return False
     if r.get("direccion") not in ("ALCISTA", "BAJISTA"):
         return False
-    esp, cons = r.get("esperanza_r"), r.get("consenso_pct")
+    esp, cons = _num(r.get("esperanza_r")), _num(r.get("consenso_pct"))   # mismos umbrales; un texto ya no revienta
     if esp is None or cons is None:
         return False
     if r.get("entrada") is None or r.get("sl") is None or r.get("tp1") is None:
@@ -94,15 +122,76 @@ def es_oportunidad(r: dict) -> bool:
     return esp >= ESPERANZA_MIN and cons >= CONSENSO_MIN
 
 
+def _num(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _plan_sombra_valido(p: dict, direccion: str, precio=None, zona: bool = False) -> bool:
+    """Plan medible: numeros finitos, geometria del lado correcto, R:R y esperanza suficientes."""
+    if not p:
+        return False
+    e, sl, tp, esp, rr = (_num(p.get(k)) for k in ("entrada", "sl", "tp1", "esperanza_r", "rr"))
+    if None in (e, sl, tp, esp, rr):
+        return False
+    alcista = direccion == "ALCISTA"
+    if not ((sl < e < tp) if alcista else (tp < e < sl)):
+        return False
+    pr = _num(precio)
+    if zona and pr is not None and (e > pr * 1.0005 if alcista else e < pr * 0.9995):
+        return False   # orden limite del lado equivocado del precio: no es una zona de retroceso
+    return esp > 0 and rr >= SOMBRA_RR_MIN
+
+
+def motivo_descarte(r: dict) -> str:
+    """Por qué un mercado no es candidato (o 'candidato'). Sirve al diagnóstico."""
+    if not r or r.get("error"):
+        return "error de datos"
+    if r.get("direccion") not in ("ALCISTA", "BAJISTA"):
+        return "sin direccion"
+    if r.get("liquidez") == "CERRADO":
+        return "mercado cerrado"
+    if (_num(r.get("consenso_pct")) or 0) < SOMBRA_CONSENSO_MIN:
+        return "consenso bajo"
+    z = r.get("zona") or {}
+    d = r.get("direccion")
+    if z.get("disponible") and _plan_sombra_valido(z, d, r.get("precio"), zona=True):
+        return "candidato"
+    if _plan_sombra_valido(r, d):
+        return "candidato"
+    if not z.get("disponible") and (_num(r.get("esperanza_r")) or 0) <= 0:
+        return "sin zona y esperanza a mercado <= 0"
+    return "R:R o esperanza insuficientes"
+
+
+def candidato_sombra(r: dict):
+    """Plan para registrar en sombra, o None. Prefiere la entrada en zona."""
+    if motivo_descarte(r) != "candidato":
+        return None
+    z = r.get("zona") or {}
+    base = {"mercado": r["mercado"], "direccion": r["direccion"], "consenso_pct": _num(r.get("consenso_pct")),
+            "smc_score": r.get("smc_score"), "precio": r.get("precio"), "sombra": True,
+            "actualizado": r.get("actualizado")}
+    if z.get("disponible") and _plan_sombra_valido(z, r["direccion"], r.get("precio"), zona=True):
+        return {**base, "tipo_plan": "zona", "entrada": _num(z["entrada"]), "sl": _num(z["sl"]), "tp1": _num(z["tp1"]),
+                "rr": _num(z.get("rr")), "esperanza_r": _num(z.get("esperanza_r")), "prob_tp_pct": _num(z.get("prob_tp_pct")),
+                "origen_zona": z.get("origen_zona")}
+    return {**base, "tipo_plan": "mercado", "entrada": _num(r["entrada"]), "sl": _num(r["sl"]), "tp1": _num(r["tp1"]),
+            "rr": _num(r.get("rr")), "esperanza_r": _num(r.get("esperanza_r")), "prob_tp_pct": _num(r.get("prob_tp_pct"))}
+
+
 def puntuacion(r: dict) -> float:
     """Ordena: esperanza ponderada por consenso; desempata por probabilidad de TP."""
-    return (r.get("esperanza_r") or 0) * ((r.get("consenso_pct") or 0) / 100.0) \
-        + 0.001 * (r.get("prob_tp_pct") or 0)
+    return (_num(r.get("esperanza_r")) or 0) * ((_num(r.get("consenso_pct")) or 0) / 100.0) \
+        + 0.001 * (_num(r.get("prob_tp_pct")) or 0)
 
 
 def analizar_uno(mercado: str) -> dict:
     try:
-        d = servicio.analizar(mercado, "mercado", con_fundamental=False, registrar=False)
+        d = servicio.analizar_escaner(mercado)
         return _resumir(mercado, d)
     except servicio.ErrorServicio as e:
         return {"mercado": mercado, "error": e.mensaje, "actualizado": time.time()}
@@ -129,12 +218,35 @@ def ciclo() -> dict:
     return dict(_estado)
 
 
-def oportunidades(excluir: str = None, n: int = 5) -> dict:
+def diagnostico(mercados: dict) -> dict:
+    out = {}
+    for r in mercados.values():
+        try:
+            k = motivo_descarte(r)
+        except Exception:  # noqa: BLE001 — un estado guardado raro no tumba la ruta
+            k = "estado invalido"
+        out[k] = out.get(k, 0) + 1
+    return out
+
+
+def oportunidades(excluir: str = None, n: int = 5, sombra: bool = False) -> dict:
     with _lock:
         mercados = dict(_estado["mercados"])
         actualizado = _estado["actualizado"]
     ex = (excluir or "").upper()
-    ops = [r for m, r in mercados.items() if m != ex and es_oportunidad(r)]
+    if sombra:
+        ops = []
+        for m, r in mercados.items():
+            if m == ex:
+                continue
+            try:
+                c = candidato_sombra(r)
+            except Exception:  # noqa: BLE001
+                c = None
+            if c:
+                ops.append(c)
+    else:
+        ops = [r for m, r in mercados.items() if m != ex and es_oportunidad(r)]
     ops.sort(key=puntuacion, reverse=True)
     ahora = time.time()
     for r in ops:
@@ -144,7 +256,10 @@ def oportunidades(excluir: str = None, n: int = 5) -> dict:
         "escaneados": len(mercados),
         "con_error": sum(1 for r in mercados.values() if r.get("error")),
         "sin_ventaja": sum(1 for r in mercados.values() if not r.get("error") and not es_oportunidad(r)),
-        "umbral": {"esperanza_min": ESPERANZA_MIN, "consenso_min": CONSENSO_MIN},
+        "umbral": ({"consenso_min": SOMBRA_CONSENSO_MIN, "rr_min": SOMBRA_RR_MIN, "esperanza_min": 0}
+                   if sombra else {"esperanza_min": ESPERANZA_MIN, "consenso_min": CONSENSO_MIN}),
+        "sombra": bool(sombra),
+        "diagnostico": diagnostico(mercados),
         "oportunidades": ops[:max(1, min(int(n or 5), 20))],
         "aviso_legal": "Análisis probabilístico. No es asesoría financiera.",
     }

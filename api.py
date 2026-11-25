@@ -240,7 +240,8 @@ async def oportunidades(request: Request):
         n = int(request.query_params.get("n", "5"))
     except ValueError:
         n = 5
-    return JSONResponse({"ok": True, "datos": escaner.oportunidades(request.query_params.get("excluir"), n)})
+    sombra = request.query_params.get("sombra", "") in ("1", "true", "si")
+    return JSONResponse({"ok": True, "datos": escaner.oportunidades(request.query_params.get("excluir"), n, sombra)})
 
 
 async def precios_ruta(request: Request):
