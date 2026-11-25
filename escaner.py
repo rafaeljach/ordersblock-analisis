@@ -23,6 +23,7 @@ Reglas:
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -101,6 +102,7 @@ def _resumir(mercado: str, d: dict) -> dict:
         "volatilidad": d.get("volatilidad"),
         "smc_score": (d.get("smc") or {}).get("score"),
         "sesion": (d.get("sesion") or {}).get("nombre") if isinstance(d.get("sesion"), dict) else d.get("sesion"),
+        "liquidez": (d.get("sesion") or {}).get("liquidez") if isinstance(d.get("sesion"), dict) else None,
         "zona": _resumir_zona(d.get("plan_precision")),
         "actualizado": time.time(),
         "error": None,
@@ -120,11 +122,28 @@ def es_oportunidad(r: dict) -> bool:
     return esp >= ESPERANZA_MIN and cons >= CONSENSO_MIN
 
 
-def _plan_sombra_valido(p: dict) -> bool:
-    if not p or p.get("entrada") is None or p.get("sl") is None or p.get("tp1") is None:
+def _num(v):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _plan_sombra_valido(p: dict, direccion: str, precio=None, zona: bool = False) -> bool:
+    """Plan medible: numeros finitos, geometria del lado correcto, R:R y esperanza suficientes."""
+    if not p:
         return False
-    esp, rr = p.get("esperanza_r"), p.get("rr")
-    return esp is not None and esp > 0 and rr is not None and rr >= SOMBRA_RR_MIN
+    e, sl, tp, esp, rr = (_num(p.get(k)) for k in ("entrada", "sl", "tp1", "esperanza_r", "rr"))
+    if None in (e, sl, tp, esp, rr):
+        return False
+    alcista = direccion == "ALCISTA"
+    if not ((sl < e < tp) if alcista else (tp < e < sl)):
+        return False
+    pr = _num(precio)
+    if zona and pr is not None and (e > pr * 1.0005 if alcista else e < pr * 0.9995):
+        return False   # orden limite del lado equivocado del precio: no es una zona de retroceso
+    return esp > 0 and rr >= SOMBRA_RR_MIN
 
 
 def motivo_descarte(r: dict) -> str:
@@ -133,14 +152,17 @@ def motivo_descarte(r: dict) -> str:
         return "error de datos"
     if r.get("direccion") not in ("ALCISTA", "BAJISTA"):
         return "sin direccion"
-    if (r.get("consenso_pct") or 0) < SOMBRA_CONSENSO_MIN:
+    if r.get("liquidez") == "CERRADO":
+        return "mercado cerrado"
+    if (_num(r.get("consenso_pct")) or 0) < SOMBRA_CONSENSO_MIN:
         return "consenso bajo"
     z = r.get("zona") or {}
-    if z.get("disponible") and _plan_sombra_valido(z):
+    d = r.get("direccion")
+    if z.get("disponible") and _plan_sombra_valido(z, d, r.get("precio"), zona=True):
         return "candidato"
-    if _plan_sombra_valido(r):
+    if _plan_sombra_valido(r, d):
         return "candidato"
-    if not z.get("disponible") and (r.get("esperanza_r") is None or r.get("esperanza_r") <= 0):
+    if not z.get("disponible") and (_num(r.get("esperanza_r")) or 0) <= 0:
         return "sin zona y esperanza a mercado <= 0"
     return "R:R o esperanza insuficientes"
 
@@ -153,7 +175,7 @@ def candidato_sombra(r: dict):
     base = {"mercado": r["mercado"], "direccion": r["direccion"], "consenso_pct": r.get("consenso_pct"),
             "smc_score": r.get("smc_score"), "precio": r.get("precio"), "sombra": True,
             "actualizado": r.get("actualizado")}
-    if z.get("disponible") and _plan_sombra_valido(z):
+    if z.get("disponible") and _plan_sombra_valido(z, r["direccion"], r.get("precio"), zona=True):
         return {**base, "tipo_plan": "zona", "entrada": z["entrada"], "sl": z["sl"], "tp1": z["tp1"],
                 "rr": z.get("rr"), "esperanza_r": z.get("esperanza_r"), "prob_tp_pct": z.get("prob_tp_pct"),
                 "origen_zona": z.get("origen_zona")}
@@ -199,7 +221,10 @@ def ciclo() -> dict:
 def diagnostico(mercados: dict) -> dict:
     out = {}
     for r in mercados.values():
-        k = motivo_descarte(r)
+        try:
+            k = motivo_descarte(r)
+        except Exception:  # noqa: BLE001 — un estado guardado raro no tumba la ruta
+            k = "estado invalido"
         out[k] = out.get(k, 0) + 1
     return out
 
@@ -210,7 +235,16 @@ def oportunidades(excluir: str = None, n: int = 5, sombra: bool = False) -> dict
         actualizado = _estado["actualizado"]
     ex = (excluir or "").upper()
     if sombra:
-        ops = [c for c in (candidato_sombra(r) for m, r in mercados.items() if m != ex) if c]
+        ops = []
+        for m, r in mercados.items():
+            if m == ex:
+                continue
+            try:
+                c = candidato_sombra(r)
+            except Exception:  # noqa: BLE001
+                c = None
+            if c:
+                ops.append(c)
     else:
         ops = [r for m, r in mercados.items() if m != ex and es_oportunidad(r)]
     ops.sort(key=puntuacion, reverse=True)

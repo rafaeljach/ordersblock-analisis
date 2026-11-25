@@ -148,6 +148,20 @@ def main():
         "esperanza cero o negativa: no es candidato")
     chk(escaner.candidato_sombra({**base, "direccion": "NEUTRAL"}) is None, "sin direccion: no es candidato")
     chk(escaner.motivo_descarte({"mercado": "X", "error": "x"}) == "error de datos", "un error de datos queda contado como tal")
+    chk(escaner.candidato_sombra({**base, "liquidez": "CERRADO", "esperanza_r": 0.03}) is None
+        and escaner.motivo_descarte({**base, "liquidez": "CERRADO"}) == "mercado cerrado",
+        "mercado cerrado (forex/metales en fin de semana): nunca es candidato")
+    chk(escaner.candidato_sombra({**base, "zona": {**base["zona"], "sl": 100.5}}) is None
+        or escaner.candidato_sombra({**base, "zona": {**base["zona"], "sl": 100.5}})["tipo_plan"] != "zona",
+        "SL del lado equivocado en la zona: la zona no se usa")
+    chk(escaner.candidato_sombra({**base, "zona": {**base["zona"], "entrada": 99.0, "tp1": 97, "sl": 100.5}}) is None,
+        "venta con la orden limite por debajo del precio: no es zona de retroceso")
+    chk(escaner.candidato_sombra({**base, "zona": {**base["zona"], "rr": float("inf")}}) is None
+        and escaner.candidato_sombra({**base, "zona": {**base["zona"], "esperanza_r": "abc"}}) is None,
+        "infinitos o texto en rr/esperanza: descartados sin romper")
+    dg = escaner.diagnostico({"A": "fila rota", "B": {**base, "consenso_pct": "70"}, "C": {**base, "consenso_pct": object()}})
+    chk(dg.get("estado invalido") == 1 and dg.get("consenso bajo") == 1 and sum(dg.values()) == 3,
+        "estado guardado raro: una fila rota se cuenta como estado invalido, el texto no rompe nada y la ruta no cae " + json.dumps(dg))
     viejo = {"mercado": "X", "direccion": "ALCISTA", "consenso_pct": 70, "esperanza_r": 0.3,
              "entrada": 1, "sl": 0.9, "tp1": 1.2, "prob_tp_pct": 60}
     chk(escaner.es_oportunidad(viejo) and not escaner.es_oportunidad({**viejo, "consenso_pct": 50}),
