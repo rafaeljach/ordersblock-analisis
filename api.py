@@ -46,6 +46,7 @@ from starlette.routing import Route
 
 import dxy
 import escaner
+import sensor
 import memoria
 import noticias
 import perpetuos
@@ -280,6 +281,26 @@ async def noticias_ruta(request: Request):
     return JSONResponse({"ok": True, "datos": datos}, headers={"Cache-Control": "public, max-age=15"})
 
 
+async def sensor_ruta(request: Request):
+    """v119 · Mapa de calor de rumores y noticias para un activo (lo lee el Worker, una vez por pasada). Con clave.
+    Si el sensor esta apagado responde {"activo": false} en vez de un error. Nunca espera al hilo del sensor ni a la red."""
+    if not _autorizado(request):
+        return _error_clave()
+    q = request.query_params
+    try:
+        desde = int(q.get("desde", "0") or 0) or None
+    except ValueError:
+        return _error(400, "desde debe ser un numero (segundos desde 1970)")
+    ahora = time.time()
+    if desde is not None and not (ahora - 30 * 86400 <= desde <= ahora + 3600):
+        return _error(400, "desde fuera de rango (ultimos 30 dias, en segundos)")
+    try:
+        datos = await asyncio.wait_for(asyncio.to_thread(sensor.consultar, str(q.get("activo", ""))[:12], desde), timeout=5)
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"/sensor: {type(e).__name__}: {e}")
+        return _error(503, "El sensor no pudo responder; el analisis sigue sin el.")
+    return JSONResponse({"ok": True, "datos": datos})
+
 async def tasa_ruta(request: Request):
     """Privado (clave): tasa USDT->COP para cobrar con Bold. Solo COP por ahora."""
     if not _autorizado(request):
@@ -410,6 +431,7 @@ async def _ciclo_de_vida(app):
         escaner.arrancar()
     if os.getenv("ORDERSBLOCK_SIN_PRECIOS") != "1":
         precios.arrancar()
+    sensor.arrancar()          # v119 · solo con ORDERSBLOCK_SENSOR=1; su propio hilo y su propia base
     _instalar_filtro_secretos()
     if API_KEY:
         logger.info("ordersblock-analisis listo (API key activa)")
@@ -422,6 +444,7 @@ async def _ciclo_de_vida(app):
             tarea.cancel()
         escaner.detener()
         precios.detener()
+        sensor.detener()
 
 
 app = Starlette(
@@ -439,6 +462,7 @@ app = Starlette(
         Route("/noticias", noticias_ruta),
         Route("/noticias/estado", noticias_estado_ruta),
         Route("/tasa/{moneda}", tasa_ruta),
+        Route("/sensor", sensor_ruta),
     ],
     middleware=[Middleware(CORSMiddleware, allow_origins=ORIGENES, allow_methods=["GET"],
                            allow_headers=["X-API-Key", "X-Usuario"])],
